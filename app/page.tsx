@@ -18,9 +18,20 @@ type ChatMessage = {
   suggestedPrompts?: string[];
 };
 type Session = { token: string; user: User };
-type Features = { voice: boolean; translation: boolean; demo_auth: boolean; pipeline_stages: string[] };
+type Features = { voice: boolean; translation: boolean; demo_auth: boolean; pipeline_stages: string[]; supported_languages?: string[] };
 type NotificationItem = { id: string; title: string; body: string; channel: string; status: string; created_at: string };
 type AuditItem = { id: string; user_id?: string; document_id?: string; action: string; created_at: string };
+
+const DEFAULT_LANGUAGE = "English";
+
+function readLanguage() {
+  if (typeof window === "undefined") return DEFAULT_LANGUAGE;
+  return window.localStorage.getItem("docuguardian_language") || DEFAULT_LANGUAGE;
+}
+
+function writeLanguage(language: string) {
+  window.localStorage.setItem("docuguardian_language", language);
+}
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const nav = [["◈", "Dashboard"], ["▤", "Documents"], ["✦", "AI Chat"], ["□", "Calendar"], ["◫", "Compare"], ["◒", "Analytics"], ["⚙", "Settings"]];
@@ -413,9 +424,43 @@ function ChatMessageBubble({ message, onSuggestedPrompt, disabled }: { message: 
     <div className={message.role === "ai" ? "chat-markdown" : "chat-plain"}>
       {message.role === "ai" ? <ChatMarkdown text={message.text} /> : message.text}
     </div>
-    {message.citations?.map((citation, citationIndex) => <span className="citation" key={citationIndex}>▣ {citation.label}{citation.page ? ` · p.${citation.page}` : ""}</span>)}
+    {!!message.citations?.length && <ChatCitations citations={message.citations} />}
     {!!message.suggestedPrompts?.length && <div className="follow-up-prompts"><span className="follow-up-label">Suggested follow-ups</span><div className="follow-up-list">{message.suggestedPrompts.map(prompt => <button className="follow-up-chip" key={prompt} type="button" onClick={() => onSuggestedPrompt(prompt)} disabled={disabled}>{prompt}</button>)}</div></div>}
   </div>;
+}
+
+function ChatCitations({ citations }: { citations: NonNullable<ChatMessage["citations"]> }) {
+  return <div className="chat-sources">
+    <span className="chat-sources-label">Sources</span>
+    <div className="chat-sources-list">
+      {citations.map((citation, index) => {
+        const fullLabel = cleanCitationLabel(citation.label);
+        const preview = truncateCitationLabel(fullLabel);
+        return <div className="chat-citation" key={`${citation.label}-${index}`} title={fullLabel}>
+          <span className="chat-citation-icon" aria-hidden="true">{index + 1}</span>
+          <div className="chat-citation-body">
+            <p className="chat-citation-text">{preview}</p>
+            {citation.page ? <span className="chat-citation-meta">Page {citation.page}</span> : null}
+          </div>
+        </div>;
+      })}
+    </div>
+  </div>;
+}
+
+function cleanCitationLabel(label: string) {
+  return label
+    .replace(/\s+/g, " ")
+    .replace(/^Page\s+\d+\s+of\s+\d+\s*/i, "")
+    .replace(/^Document\s+No\.?\s*[\d/]+\s*/i, "")
+    .trim();
+}
+
+function truncateCitationLabel(label: string, maxLength = 130) {
+  if (label.length <= maxLength) return label;
+  const cut = label.slice(0, maxLength);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > 70 ? cut.slice(0, lastSpace) : cut).trim()}…`;
 }
 
 function ChatMarkdown({ text }: { text: string }) {

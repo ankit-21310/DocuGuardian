@@ -60,6 +60,14 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if origin.strip()]
 FEATURE_VOICE = os.getenv("FEATURE_VOICE", "false").lower() in {"1", "true", "yes"}
 FEATURE_TRANSLATION = os.getenv("FEATURE_TRANSLATION", "false").lower() in {"1", "true", "yes"}
+SUPPORTED_LANGUAGES = tuple(
+    language.strip()
+    for language in os.getenv(
+        "SUPPORTED_LANGUAGES",
+        "English,Spanish,Hindi,French,German,Arabic,Portuguese,Chinese (Simplified),Japanese,Marathi,Tamil",
+    ).split(",")
+    if language.strip()
+)
 SMTP_URL = os.getenv("SMTP_URL", "").strip()
 NOTIFICATION_FROM = os.getenv("NOTIFICATION_FROM", "noreply@docuguardian.local")
 

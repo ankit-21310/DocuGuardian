@@ -260,6 +260,19 @@ CHAT_RESPONSE_SCHEMA = {
 }
 
 
+def _format_citation_label(content: str, limit: int = 140) -> str:
+    cleaned = re.sub(r"\s+", " ", content or "").strip()
+    cleaned = re.sub(r"^Page\s+\d+\s+of\s+\d+\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^Document\s+No\.?\s*[\d/]+\s*", "", cleaned, flags=re.IGNORECASE)
+    if len(cleaned) <= limit:
+        return cleaned
+    cut = cleaned[:limit]
+    last_space = cut.rfind(" ")
+    if last_space > 70:
+        cut = cut[:last_space]
+    return f"{cut.rstrip()}…"
+
+
 def _default_suggested_prompts(report: dict[str, Any], question: str) -> list[str]:
     prompts: list[str] = []
     if report.get("risks"):
@@ -288,6 +301,7 @@ def answer_question(
     report: dict[str, Any],
     question: str,
     retrieved_chunks: list[dict[str, Any]] | None = None,
+    target_language: str | None = None,
 ) -> dict[str, Any]:
     api = client()
     chunk_context = "\n\n".join(
@@ -304,6 +318,12 @@ def answer_question(
         "action_plan": report.get("action_plan", [])[:12],
         "evidence": evidence[:12],
     }
+    language_instruction = ""
+    if target_language and target_language.strip().lower() not in {"english", "en"}:
+        language_instruction = (
+            f" Write both `answer` and every item in `suggested_prompts` in {target_language.strip()}. "
+            "Keep source labels in their original language when needed for traceability."
+        )
     response = api.responses.create(
         model=OPENAI_MODEL,
         input=[
@@ -316,7 +336,7 @@ def answer_question(
                     "Format `answer` in Markdown with short paragraphs, bullet lists for multiple items, "
                     "and **bold** for key terms, dates, and risks. "
                     "Return 2-3 concise follow-up questions in `suggested_prompts` that help the user dig deeper "
-                    "into this specific document. Do not repeat the user's question."
+                    f"into this specific document. Do not repeat the user's question.{language_instruction}"
                 ),
             },
             {
@@ -345,11 +365,11 @@ def answer_question(
     citations: list[dict[str, Any]] = []
     answer_lower = answer_text.lower()
     for chunk in retrieved_chunks or []:
-        snippet = (chunk.get("content") or "")[:160]
+        snippet = _format_citation_label(chunk.get("content") or "")
         if snippet and any(token in answer_lower for token in snippet.lower().split()[:6]):
             citations.append({"label": snippet, "page": chunk.get("page"), "confidence": report.get("confidence", 0.8)})
     for item in evidence:
-        label = item.get("label") or item.get("text_span", "")
+        label = _format_citation_label(item.get("label") or item.get("text_span", ""))
         if label and label.lower()[:40] in answer_lower or any(
             word in answer_lower for word in re.findall(r"[a-z]{5,}", (label or "").lower())[:3]
         ):
@@ -362,11 +382,11 @@ def answer_question(
             )
     if not citations:
         for item in (retrieved_chunks or [])[:3]:
-            citations.append({"label": (item.get("content") or "")[:160], "page": item.get("page"), "confidence": report.get("confidence", 0.8)})
+            citations.append({"label": _format_citation_label(item.get("content") or ""), "page": item.get("page"), "confidence": report.get("confidence", 0.8)})
         for item in evidence[:2]:
             citations.append(
                 {
-                    "label": item.get("label") or item.get("text_span", "Document evidence"),
+                    "label": _format_citation_label(item.get("label") or item.get("text_span", "Document evidence")),
                     "page": item.get("page"),
                     "confidence": item.get("confidence", report.get("confidence", 0.8)),
                 }

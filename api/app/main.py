@@ -24,6 +24,7 @@ from .config import (
     ENVIRONMENT,
     FEATURE_TRANSLATION,
     FEATURE_VOICE,
+    SUPPORTED_LANGUAGES,
     MAX_UPLOAD_BYTES,
     PIPELINE_STAGES,
     PROCESSING_MODE,
@@ -221,6 +222,7 @@ def record_audit(document_id: str | None, action: str, user: dict[str, Any] | No
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
+    target_language: str | None = Field(default=None, max_length=64)
 
 
 class ReminderRequest(BaseModel):
@@ -434,7 +436,13 @@ def chat(document_id: str, request: ChatRequest, user: dict[str, Any] = Depends(
     ]
     retrieved = retrieve_chunks(request.message, chunks)
     try:
-        response = answer_question(document["name"], report, request.message, retrieved)
+        response = answer_question(
+            document["name"],
+            report,
+            request.message,
+            retrieved,
+            target_language=request.target_language,
+        )
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error))
     except Exception as error:
@@ -643,6 +651,7 @@ def features() -> dict[str, Any]:
         "translation": FEATURE_TRANSLATION,
         "demo_auth": ENABLE_DEMO_AUTH,
         "pipeline_stages": list(PIPELINE_STAGES),
+        "supported_languages": list(SUPPORTED_LANGUAGES),
     }
 
 
