@@ -33,6 +33,10 @@ function writeLanguage(language: string) {
   window.localStorage.setItem("docuguardian_language", language);
 }
 
+function languageOptions(features: Features | null) {
+  return features?.supported_languages?.length ? features.supported_languages : [DEFAULT_LANGUAGE, "Spanish", "Hindi", "French", "German", "Arabic"];
+}
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const nav = [["◈", "Dashboard"], ["▤", "Documents"], ["✦", "AI Chat"], ["□", "Calendar"], ["◫", "Compare"], ["◒", "Analytics"], ["⚙", "Settings"]];
 
@@ -66,6 +70,9 @@ export default function Home() {
   const [processingVisible, setProcessingVisible] = useState(false);
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState("");
+  const [language, setLanguage] = useState(DEFAULT_LANGUAGE);
+
+  useEffect(() => { setLanguage(readLanguage()); }, []);
 
   useEffect(() => {
     fetch(`${API_URL}/api/v1/features`).then(async response => { if (response.ok) setFeatures(await response.json()); }).catch(() => undefined);
@@ -142,7 +149,7 @@ export default function Home() {
 
   const currentPage = active === "Dashboard"
     ? <Dashboard docs={docs} deadlines={deadlines} analytics={analytics} loading={loading} onUpload={() => setUploadOpen(true)} onOpenDocuments={() => setActive("Documents")} onOpenChat={() => setActive("AI Chat")} onOpenCalendar={() => setActive("Calendar")} />
-    : <WorkspaceScreen active={active} docs={docs} deadlines={deadlines} analytics={analytics} notifications={notifications} features={features} user={session.user} token={session.token} onUpload={() => setUploadOpen(true)} onRefresh={() => loadWorkspace(session)} onToast={setToast} />;
+    : <WorkspaceScreen active={active} docs={docs} deadlines={deadlines} analytics={analytics} notifications={notifications} features={features} user={session.user} token={session.token} language={language} onLanguageChange={next => { writeLanguage(next); setLanguage(next); setToast(`Language set to ${next}.`); }} onUpload={() => setUploadOpen(true)} onRefresh={() => loadWorkspace(session)} onToast={setToast} />;
 
   return <div className="app-shell">
     <aside className="sidebar"><div className="brand"><span className="brand-mark">D</span><span>DocuGuardian</span></div><div className="nav-label">Workspace</div><nav className="nav">{nav.map(([icon, label]) => <button key={label} className={active === label ? "active" : ""} onClick={() => setActive(label)}><span className="nav-icon">{icon}</span><span>{label}</span></button>)}</nav><div className="sidebar-bottom"><div className="user"><span className="avatar">{initials(session.user.name)}</span><div><b>{session.user.name}</b><small>{session.user.role} · {session.user.email}</small></div></div><button className="signout" onClick={signOut}>Sign out</button></div></aside>
@@ -164,7 +171,7 @@ function LandingPage({ onSignIn, onWatchDemo, features }: { onSignIn: () => void
       <div className="landing-cta"><button className="primary" onClick={onSignIn}>Get started</button><button className="ghost" onClick={onWatchDemo}>Watch demo</button></div>
     </div>
     <div className="landing-grid">
-      {["Plain-language summary", "Risk score 0–100", "Hidden penalty detection", "Deadline reminders", "Grounded AI chat", "Contract comparison"].map(item => <div className="landing-feature" key={item}><strong>{item}</strong><p>Evidence-backed intelligence from your uploaded documents.</p></div>)}
+      {["Plain-language summary", "Risk score 0–100", "Hidden penalty detection", "Deadline reminders", "Grounded AI chat", "Multi-language translation", "Voice summary", "Contract comparison"].map(item => <div className="landing-feature" key={item}><strong>{item}</strong><p>Evidence-backed intelligence from your uploaded documents.</p></div>)}
     </div>
     {features?.pipeline_stages?.length ? <p className="landing-note">Live pipeline: {features.pipeline_stages.join(" → ")}</p> : null}
   </div>;
@@ -193,7 +200,7 @@ function Dashboard({ docs, deadlines, analytics, loading, onUpload, onOpenDocume
   return <><div className="intro"><div><h1>{greetingForNow()}</h1><p>Here’s what’s happening with your documents.</p></div><button className="primary" onClick={onUpload}>＋ Upload document</button></div><div className="stats"><Stat icon="▤" label="Documents uploaded" value={analytics ? String(analytics.documents_uploaded) : "—"} foot="Persisted in workspace" /><Stat icon="!" label="High risk documents" value={analytics ? String(analytics.high_risk_documents) : "—"} foot="Needs your attention" tone="red" /><Stat icon="◷" label="Upcoming deadlines" value={analytics ? String(analytics.upcoming_deadlines) : "—"} foot="Extracted from documents" tone="orange" /><Stat icon="✓" label="Protection score" value={analytics ? `${protection}%` : "—"} foot="From workspace analytics" tone="green" /></div>{loading ? <EmptyState title="Loading workspace" text="Fetching your documents and deadlines…" /> : <div className="grid"><div className="card docs"><div className="panel-head"><h2>Recent documents</h2><button className="view" onClick={onOpenDocuments}>View all →</button></div>{docs.length ? docs.slice(0, 6).map(doc => <div className="doc-row" key={doc.id}><DocumentRow doc={doc} /></div>) : <EmptyState title="No documents yet" text="Upload a document to start your first analysis." action={onUpload} actionLabel="Upload document" />}</div><div><div className="card deadline"><div className="panel-head"><h2>Upcoming deadlines</h2><button className="view" onClick={onOpenCalendar}>Calendar →</button></div>{deadlines.length ? deadlines.slice(0, 5).map(deadline => <DeadlineRow key={deadline.id} deadline={deadline} />) : <EmptyState title="No deadlines found" text="Deadlines will appear here when they are extracted from a report." />}</div><div className="insight"><h3>✦ Evidence-backed workspace</h3><p>Open an analyzed report to review source evidence, confidence, deadlines, and recommendations.</p><button onClick={onOpenChat}>Ask DocuGuardian →</button></div></div></div>}</>;
 }
 
-function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, features, user, token, onUpload, onRefresh, onToast }: { active: string; docs: DocumentItem[]; deadlines: Deadline[]; analytics: Analytics | null; notifications: NotificationItem[]; features: Features | null; user: User; token: string; onUpload: () => void; onRefresh: () => void; onToast: (message: string) => void }) {
+function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, features, user, token, language, onLanguageChange, onUpload, onRefresh, onToast }: { active: string; docs: DocumentItem[]; deadlines: Deadline[]; analytics: Analytics | null; notifications: NotificationItem[]; features: Features | null; user: User; token: string; language: string; onLanguageChange: (language: string) => void; onUpload: () => void; onRefresh: () => void; onToast: (message: string) => void }) {
   const [report, setReport] = useState<Report | null>(null);
   const [reportDoc, setReportDoc] = useState<DocumentItem | null>(null);
   const [question, setQuestion] = useState("");
@@ -244,7 +251,7 @@ function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, fe
     setMessages(items => [...items, { role: "user", text }]);
     setChatLoading(true);
     try {
-      const response = await apiFetch(`/api/v1/documents/${selectedChatDoc}/chat`, token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text }) });
+      const response = await apiFetch(`/api/v1/documents/${selectedChatDoc}/chat`, token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text, target_language: features?.translation ? language : undefined }) });
       if (!response.ok) {
         const payload = await response.json().catch(() => null);
         const detail = payload?.detail;
@@ -300,18 +307,18 @@ function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, fe
   return <>
     <div className="workspace-head"><div><h1>{title}</h1><p>{subtitle}</p></div>{active === "Documents" && <button className="primary" onClick={onUpload}>＋ Upload document</button>}</div>
     {error && <p className="form-error">{error}</p>}
-    {active === "Documents" && <div className="workspace-grid"><div className="card workspace-card"><h2>All documents <span className="muted-count">({docs.length})</span></h2>{docs.length ? docs.map(doc => <div className="doc-row" key={doc.id}><DocumentRow doc={doc} compact /><div className="doc-actions"><button className="view" onClick={() => openReport(doc)} disabled={doc.status !== "completed"}>Report →</button>{(doc.status === "failed" || doc.status === "completed") && <button className="view" onClick={() => retryDoc(doc.id)}>Retry</button>}<button className="view danger" onClick={() => removeDoc(doc.id)}>Delete</button></div></div>) : <EmptyState title="No documents yet" text="Upload a document to begin." action={onUpload} actionLabel="Upload document" />}</div><ReportPanel report={report} reportDoc={reportDoc} token={token} features={features} onToast={onToast} /></div>}
-    {active === "AI Chat" && <div className="chat-shell"><div className="card chat-box"><div className="chat-toolbar"><label>Document<select value={selectedChatDoc} onChange={event => setSelectedChatDoc(event.target.value)} disabled={chatLoading}><option value="">Select an analyzed document</option>{analyzedDocs.map(doc => <option key={doc.id} value={doc.id}>{doc.name}</option>)}</select></label></div><div className="messages">{messages.map((message, index) => <ChatMessageBubble key={index} message={message} onSuggestedPrompt={ask} disabled={chatLoading || !selectedChatDoc} />)} {chatLoading && <ChatTypingIndicator />}<div ref={messagesEndRef} /></div><div className="chat-input"><input value={question} onChange={event => setQuestion(event.target.value)} onKeyDown={event => event.key === "Enter" && !chatLoading && ask()} placeholder={chatLoading ? "Waiting for response…" : "Ask about your documents…"} disabled={chatLoading || !selectedChatDoc} /><button className={`primary ${chatLoading ? "loading" : ""}`} onClick={() => ask()} disabled={chatLoading || !selectedChatDoc || !question.trim()}>{chatLoading ? "Thinking…" : "Send"}</button></div></div><div className="card workspace-card"><h2>Suggested prompts</h2>{prompts.map(prompt => <button className="prompt" key={prompt} onClick={() => ask(prompt)} disabled={chatLoading || !selectedChatDoc}>{prompt} <span>→</span></button>)}<p className="disclaimer">Decision support only. Confirm important decisions with a qualified professional.</p></div></div>}
+    {active === "Documents" && <div className="workspace-grid"><div className="card workspace-card"><h2>All documents <span className="muted-count">({docs.length})</span></h2>{docs.length ? docs.map(doc => <div className="doc-row" key={doc.id}><DocumentRow doc={doc} compact /><div className="doc-actions"><button className="view" onClick={() => openReport(doc)} disabled={doc.status !== "completed"}>Report →</button>{(doc.status === "failed" || doc.status === "completed") && <button className="view" onClick={() => retryDoc(doc.id)}>Retry</button>}<button className="view danger" onClick={() => removeDoc(doc.id)}>Delete</button></div></div>) : <EmptyState title="No documents yet" text="Upload a document to begin." action={onUpload} actionLabel="Upload document" />}</div><ReportPanel report={report} reportDoc={reportDoc} token={token} features={features} language={language} languages={languageOptions(features)} onToast={onToast} /></div>}
+    {active === "AI Chat" && <div className="chat-shell"><div className="card chat-box"><div className="chat-toolbar"><label>Document<select value={selectedChatDoc} onChange={event => setSelectedChatDoc(event.target.value)} disabled={chatLoading}><option value="">Select an analyzed document</option>{analyzedDocs.map(doc => <option key={doc.id} value={doc.id}>{doc.name}</option>)}</select></label>{features?.translation && <label>Response language<LanguageSelect value={language} languages={languageOptions(features)} onChange={onLanguageChange} disabled={chatLoading} /></label>}</div><div className="messages">{messages.map((message, index) => <ChatMessageBubble key={index} message={message} onSuggestedPrompt={ask} disabled={chatLoading || !selectedChatDoc} />)} {chatLoading && <ChatTypingIndicator />}<div ref={messagesEndRef} /></div><div className="chat-input"><input value={question} onChange={event => setQuestion(event.target.value)} onKeyDown={event => event.key === "Enter" && !chatLoading && ask()} placeholder={chatLoading ? "Waiting for response…" : "Ask about your documents…"} disabled={chatLoading || !selectedChatDoc} /><button className={`primary ${chatLoading ? "loading" : ""}`} onClick={() => ask()} disabled={chatLoading || !selectedChatDoc || !question.trim()}>{chatLoading ? "Thinking…" : "Send"}</button></div></div><div className="card workspace-card"><h2>Suggested prompts</h2>{prompts.map(prompt => <button className="prompt" key={prompt} onClick={() => ask(prompt)} disabled={chatLoading || !selectedChatDoc}>{prompt} <span>→</span></button>)}<p className="disclaimer">Decision support only. Confirm important decisions with a qualified professional.</p></div></div>}
     {active === "Calendar" && <CalendarScreen deadlines={deadlines} onRemind={remind} onRefresh={onRefresh} notifications={notifications} />}
     {active === "Compare" && <ComparisonScreen docs={analyzedDocs} compareIds={compareIds} setCompareIds={setCompareIds} compare={compare} comparison={comparison} />}
     {active === "Analytics" && <AnalyticsScreen analytics={analytics} />}
-    {active === "Settings" && <SettingsScreen user={user} features={features} audit={audit} notifications={notifications} />}
+    {active === "Settings" && <SettingsScreen user={user} features={features} audit={audit} notifications={notifications} language={language} languages={languageOptions(features)} onLanguageChange={onLanguageChange} />}
   </>;
 }
 
-function ReportPanel({ report, reportDoc, token, features, onToast }: { report: Report | null; reportDoc: DocumentItem | null; token: string; features: Features | null; onToast: (message: string) => void }) {
+function ReportPanel({ report, reportDoc, token, features, language, languages, onToast }: { report: Report | null; reportDoc: DocumentItem | null; token: string; features: Features | null; language: string; languages: string[]; onToast: (message: string) => void }) {
   const [translation, setTranslation] = useState("");
-  const [language, setLanguage] = useState("Spanish");
+  const [translating, setTranslating] = useState(false);
   if (!report || !reportDoc) return <div className="card workspace-card"><h2>Intelligence report</h2><p className="report-summary">Select an analyzed document to review its summary, risks, clauses, deadlines, action plan, and source evidence.</p></div>;
   const activeReport = report;
   const activeDoc = reportDoc;
@@ -324,14 +331,25 @@ function ReportPanel({ report, reportDoc, token, features, onToast }: { report: 
     link.href = url; link.download = `${activeDoc.name}-report.json`; link.click(); URL.revokeObjectURL(url);
   }
 
-  async function translateSummary() {
-    const response = await apiFetch("/api/v1/translate", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: activeReport.summary, target_language: language }) });
-    if (!response.ok) { onToast("Translation is unavailable."); return; }
-    const data = await response.json(); setTranslation(data.translated_text); onToast(`Translated to ${language}.`);
+  async function translateReport() {
+    if (!features?.translation) return;
+    setTranslating(true);
+    try {
+      const sections = [
+        `Summary:\n${activeReport.summary}`,
+        activeReport.recommendations.length ? `Recommendations:\n${activeReport.recommendations.map(item => `- ${item}`).join("\n")}` : "",
+        activeReport.action_plan?.length ? `Action plan:\n${activeReport.action_plan.map(item => `- ${item.title}: ${item.detail}`).join("\n")}` : "",
+      ].filter(Boolean).join("\n\n");
+      const response = await apiFetch("/api/v1/translate", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: sections, target_language: language }) });
+      if (!response.ok) { onToast("Translation is unavailable."); return; }
+      const data = await response.json(); setTranslation(data.translated_text); onToast(`Report translated to ${language}.`);
+    } finally {
+      setTranslating(false);
+    }
   }
 
   async function playVoice() {
-    const response = await apiFetch("/api/v1/voice-summary", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: activeReport.summary }) });
+    const response = await apiFetch("/api/v1/voice-summary", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: translation || activeReport.summary }) });
     if (!response.ok) { onToast("Voice summary is unavailable."); return; }
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
@@ -341,11 +359,11 @@ function ReportPanel({ report, reportDoc, token, features, onToast }: { report: 
   }
 
   return <div className="card workspace-card report-panel">
-    <div className="report-header"><h2>{activeDoc.name}</h2><div className="doc-actions"><button className="view" onClick={download}>Download report</button>{features?.translation && <button className="view" onClick={translateSummary}>Translate</button>}{features?.voice && <button className="view" onClick={playVoice}>Voice summary</button>}</div></div>
+    <div className="report-header"><h2>{activeDoc.name}</h2><div className="doc-actions"><button className="view" onClick={download}>Download report</button>{features?.translation && <button className="view" onClick={translateReport} disabled={translating}>{translating ? "Translating…" : `Translate to ${language}`}</button>}{features?.voice && <button className="view" onClick={playVoice}>Voice summary</button>}</div></div>
     <div className="metric"><strong>{activeReport.risk_score}</strong><small>{activeReport.risk_level} risk · {activeReport.classification} · confidence {Math.round(activeReport.confidence * 100)}%</small></div>
+    {features?.translation && <div className="language-note">Translations use your workspace language from Settings or AI Chat: <strong>{language}</strong></div>}
     <p className="report-summary">{activeReport.summary}</p>
-    {features?.translation && <div className="inline-tools"><input value={language} onChange={event => setLanguage(event.target.value)} aria-label="Target language" /><button className="view" onClick={translateSummary}>Apply</button></div>}
-    {translation && <p className="report-summary">{translation}</p>}
+    {translation && <div className="translation-panel"><h3>Translated report ({language})</h3><p className="report-summary">{translation}</p></div>}
     <h3>Risk analysis</h3>
     {activeReport.risks.length ? activeReport.risks.map((risk, index) => <div className="finding" key={`${risk.title}-${index}`}><div className="finding-top"><strong>{risk.title}{risk.is_penalty ? " · penalty" : ""}</strong><span className={`pill ${risk.severity}`}>{risk.severity}</span></div><p>{risk.explanation}</p><small>{risk.recommendation}</small><div className="citation">{risk.source}{risk.page ? ` · page ${risk.page}` : ""}{risk.text_span ? ` · “${risk.text_span}”` : ""}{risk.confidence ? ` · ${Math.round(risk.confidence * 100)}% confidence` : ""}</div></div>) : <p className="muted">No risks were extracted.</p>}
     {!!activeReport.hidden_penalties?.length && <><h3>Hidden penalties</h3>{activeReport.hidden_penalties.map((risk, index) => <div className="finding" key={`penalty-${index}`}><div className="finding-top"><strong>{risk.title}</strong><span className={`pill ${risk.severity}`}>{risk.severity}</span></div><p>{risk.explanation}</p></div>)}</>}
@@ -412,11 +430,17 @@ function AnalyticsScreen({ analytics }: { analytics: Analytics | null }) {
   </div>;
 }
 
-function SettingsScreen({ user, features, audit, notifications }: { user: User; features: Features | null; audit: AuditItem[]; notifications: NotificationItem[] }) {
+function SettingsScreen({ user, features, audit, notifications, language, languages, onLanguageChange }: { user: User; features: Features | null; audit: AuditItem[]; notifications: NotificationItem[]; language: string; languages: string[]; onLanguageChange: (language: string) => void }) {
   return <div className="workspace-grid">
-    <div className="card workspace-card"><h2>Account</h2><p className="report-summary"><strong>{user.name}</strong><br />{user.email}<br />Role: {user.role}<br />Organization: {user.organization_id}</p><h3>Feature flags</h3><p className="muted">Voice: {features?.voice ? "on" : "off"} · Translation: {features?.translation ? "on" : "off"} · Demo auth: {features?.demo_auth ? "on" : "off"}</p></div>
+    <div className="card workspace-card"><h2>Account</h2><p className="report-summary"><strong>{user.name}</strong><br />{user.email}<br />Role: {user.role}<br />Organization: {user.organization_id}</p>{features?.translation && <><h3>Preferred language</h3><p className="muted">Used for AI Chat responses and document report translations.</p><LanguageSelect value={language} languages={languages} onChange={onLanguageChange} /></>}<h3>Feature flags</h3><p className="muted">Voice: {features?.voice ? "on" : "off"} · Translation: {features?.translation ? "on" : "off"} · Demo auth: {features?.demo_auth ? "on" : "off"}</p></div>
     <div className="card workspace-card"><h2>Notifications</h2>{notifications.length ? notifications.slice(0, 8).map(item => <div className="finding" key={item.id}><strong>{item.title}</strong><p>{item.body}</p></div>) : <p className="muted">No notifications yet.</p>}<h2>Audit log</h2>{audit.length ? audit.slice(0, 12).map(item => <div className="timeline-item" key={item.id}><span className="timeline-dot" /><div><strong>{item.action}</strong><small>{formatDate(item.created_at)}{item.document_id ? ` · ${item.document_id.slice(0, 8)}` : ""}</small></div></div>) : <p className="muted">Audit events appear for owners and admins.</p>}</div>
   </div>;
+}
+
+function LanguageSelect({ value, languages, onChange, disabled = false }: { value: string; languages: string[]; onChange: (language: string) => void; disabled?: boolean }) {
+  return <select className="language-select" value={value} onChange={event => onChange(event.target.value)} disabled={disabled} aria-label="Language">
+    {languages.map(language => <option key={language} value={language}>{language}</option>)}
+  </select>;
 }
 
 function ChatMessageBubble({ message, onSuggestedPrompt, disabled }: { message: ChatMessage; onSuggestedPrompt: (text: string) => void; disabled: boolean }) {
