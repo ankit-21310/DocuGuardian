@@ -5,11 +5,11 @@ DocuGuardian is an AI document-intelligence workspace with authenticated workspa
 ## Key features
 
 - Plain-language summary with risk score (0–100)
-- Clause severity and hidden penalty detection
-- Deadline extraction with calendar and reminders
+- Clause severity, hidden penalty detection, obligations, and fraud indicators
+- Deadline extraction with internal calendar, reminders, and optional Google/Outlook sync
 - Grounded AI chat with citations and suggested follow-ups
-- Document comparison across analyzed reports
-- Multi-language translation for reports and chat responses
+- Document comparison across analyzed reports (including deadline date changes and risk deltas)
+- Multi-language translation for reports, chat responses, and localized UI chrome
 - Voice summary playback for translated or original summaries
 - Workspace analytics and audit trail
 
@@ -70,23 +70,35 @@ cp .env.example .env
 
 - `ENABLE_DEMO_AUTH` — demo login seed (off in production by default)
 
-### Multi-language and voice
+### Multi-language, voice, and fraud
 
-- `FEATURE_TRANSLATION=true` — enables `/api/v1/translate`, report translation, and language-aware chat
-- `FEATURE_VOICE=true` — enables `/api/v1/voice-summary` playback in the report panel
+- `FEATURE_TRANSLATION` — enables translation when true; leave blank to enable automatically when `OPENAI_API_KEY` is configured
+- `FEATURE_VOICE` — enables voice summaries when true; leave blank to enable automatically when `OPENAI_API_KEY` is configured
+- `FEATURE_FRAUD` — enables fraud indicator extraction in reports; leave blank to enable automatically when `OPENAI_API_KEY` is configured
 - `SUPPORTED_LANGUAGES` — comma-separated list exposed to the UI (Settings and AI Chat language selectors)
 
 When translation is enabled:
 
 - **Settings** stores the preferred workspace language in browser local storage
+- **UI chrome** (navigation, report section headings, compare labels) follows the selected language via `app/i18n/`
 - **AI Chat** sends `target_language` so answers and follow-up prompts are returned in that language
-- **Documents → Report** can translate summary, recommendations, and action plan
+- **Documents → Report** can translate the full report while preserving source citations and severity metadata
+
+### External calendar sync
+
+Set `FEATURE_EXTERNAL_CALENDAR=true` and configure OAuth credentials:
+
+- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`
+- `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`, `MICROSOFT_TENANT_ID`, `MICROSOFT_REDIRECT_URI`
+- `FRONTEND_URL` — used to redirect back to Settings after OAuth
+
+Connect Google or Outlook from **Settings → Calendar integrations**. Auto-sync pushes extracted deadlines to the connected calendar.
 
 Restart the API after changing feature flags or language settings in `.env`.
 
 ### Notifications
 
-- `SMTP_URL` — optional email delivery for reminders
+- `SMTP_URL` — optional email delivery for scheduled reminders
 - `NOTIFICATION_FROM` — sender address for email reminders
 
 ## Structure
@@ -99,11 +111,14 @@ Restart the API after changing feature flags or language settings in `.env`.
 - `api/app/pipeline_runner.py` — multi-stage document pipeline
 - `api/app/ai.py` — OpenAI analysis, embeddings, grounded chat, translation, TTS
 - `api/app/parsing.py` — OCR/text extraction and chunking
-- `api/app/notifications.py` — in-app/email reminder delivery
+- `api/app/calendar_sync.py` — Google/Outlook OAuth and deadline sync
+- `app/i18n/` — localized UI messages and translation hook
 - `worker/` — compose worker + shared stage contract
 - `infra/docker-compose.yml` — web, API, worker, PostgreSQL, Redis, MinIO
 - `plan.md` / `arch.md` / `ui.md` — product specs
 
-## Deferred (by design)
+Additional workflow endpoints include `PATCH /api/v1/action-items/{id}` for persistent action completion, `POST /api/v1/documents/{id}/translate` for full-report translation, and `/api/v1/integrations/calendar/*` for external calendar OAuth and sync. Reminder requests are scheduled and delivered by the local API loop or compose worker.
 
-Fraud indicators, Google/Outlook calendar OAuth, full UI localization (menus/buttons in every language), and React Native mobile are deferred until the core pipeline remains stable.
+## Still out of scope
+
+React Native mobile remains a separate future app.

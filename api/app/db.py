@@ -156,7 +156,9 @@ CREATE TABLE IF NOT EXISTS deadlines (
 CREATE TABLE IF NOT EXISTS reminders (
   id TEXT PRIMARY KEY, deadline_id TEXT NOT NULL, channel TEXT NOT NULL,
   days_before INTEGER NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL,
-  delivered_at TEXT, FOREIGN KEY(deadline_id) REFERENCES deadlines(id) ON DELETE CASCADE
+  delivered_at TEXT, user_id TEXT, scheduled_for TEXT, error TEXT,
+  FOREIGN KEY(deadline_id) REFERENCES deadlines(id) ON DELETE CASCADE,
+  FOREIGN KEY(user_id) REFERENCES users(id)
 );
 CREATE TABLE IF NOT EXISTS audit_logs (
   id TEXT PRIMARY KEY, organization_id TEXT, user_id TEXT, document_id TEXT,
@@ -185,6 +187,34 @@ CREATE TABLE IF NOT EXISTS document_risks (
   is_penalty INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS document_obligations (
+  id TEXT PRIMARY KEY, document_id TEXT NOT NULL, title TEXT NOT NULL,
+  party TEXT NOT NULL, description TEXT NOT NULL, severity TEXT NOT NULL,
+  due_date TEXT, page INTEGER, text_span TEXT, confidence REAL,
+  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS document_fraud_indicators (
+  id TEXT PRIMARY KEY, document_id TEXT NOT NULL, title TEXT NOT NULL,
+  indicator_type TEXT NOT NULL, severity TEXT NOT NULL, explanation TEXT NOT NULL,
+  page INTEGER, text_span TEXT, confidence REAL,
+  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS calendar_integrations (
+  id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, user_id TEXT NOT NULL,
+  provider TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT,
+  expires_at TEXT, calendar_id TEXT, auto_sync INTEGER NOT NULL DEFAULT 1,
+  last_sync_at TEXT, created_at TEXT NOT NULL,
+  UNIQUE(organization_id, user_id, provider),
+  FOREIGN KEY(user_id) REFERENCES users(id),
+  FOREIGN KEY(organization_id) REFERENCES organizations(id)
+);
+CREATE TABLE IF NOT EXISTS calendar_sync_map (
+  id TEXT PRIMARY KEY, deadline_id TEXT NOT NULL, integration_id TEXT NOT NULL,
+  external_event_id TEXT NOT NULL,
+  UNIQUE(deadline_id, integration_id),
+  FOREIGN KEY(deadline_id) REFERENCES deadlines(id) ON DELETE CASCADE,
+  FOREIGN KEY(integration_id) REFERENCES calendar_integrations(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS action_items (
   id TEXT PRIMARY KEY, document_id TEXT NOT NULL, title TEXT NOT NULL,
   detail TEXT NOT NULL, priority TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
@@ -202,9 +232,17 @@ CREATE TABLE IF NOT EXISTS notifications (
   status TEXT NOT NULL, created_at TEXT NOT NULL, read_at TEXT,
   related_deadline_id TEXT, related_document_id TEXT
 );
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id TEXT PRIMARY KEY, user_id TEXT NOT NULL, document_id TEXT NOT NULL,
+  title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE,
+  FOREIGN KEY(user_id) REFERENCES users(id)
+);
 CREATE TABLE IF NOT EXISTS chat_messages (
   id TEXT PRIMARY KEY, document_id TEXT NOT NULL, user_id TEXT NOT NULL,
   role TEXT NOT NULL, content TEXT NOT NULL, citations_json TEXT,
-  created_at TEXT NOT NULL, FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+  created_at TEXT NOT NULL, session_id TEXT,
+  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE,
+  FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
 );
 """

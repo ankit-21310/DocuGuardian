@@ -78,6 +78,51 @@ INTELLIGENCE_SCHEMA = {
                 "required": ["title", "severity", "explanation", "recommendation", "source", "page", "text_span", "confidence", "is_penalty"],
             },
         },
+        "obligations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "title": {"type": "string"},
+                    "party": {"type": "string"},
+                    "description": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "due_date": {"type": ["string", "null"]},
+                    "page": {"type": ["integer", "null"], "minimum": 1},
+                    "text_span": {"type": ["string", "null"]},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+                "required": ["title", "party", "description", "severity", "due_date", "page", "text_span", "confidence"],
+            },
+        },
+        "fraud_indicators": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "title": {"type": "string"},
+                    "indicator_type": {
+                        "type": "string",
+                        "enum": [
+                            "missing_signature",
+                            "inconsistent_dates",
+                            "suspicious_terms",
+                            "unverified_party",
+                            "altered_document",
+                            "misleading_claims",
+                        ],
+                    },
+                    "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "explanation": {"type": "string"},
+                    "page": {"type": ["integer", "null"], "minimum": 1},
+                    "text_span": {"type": ["string", "null"]},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+                "required": ["title", "indicator_type", "severity", "explanation", "page", "text_span", "confidence"],
+            },
+        },
         "deadlines": {
             "type": "array",
             "items": {
@@ -135,6 +180,8 @@ INTELLIGENCE_SCHEMA = {
         "entities",
         "clauses",
         "risks",
+        "obligations",
+        "fraud_indicators",
         "deadlines",
         "recommendations",
         "action_plan",
@@ -157,7 +204,9 @@ def analyze_document_text(text: str, filename: str) -> dict[str, Any]:
                     "text": (
                         f"Analyze the document `{filename}` for DocuGuardian. Use ONLY evidence present in the text. "
                         "Return classification, entities, clauses with severity, risks (set is_penalty true for hidden fees/"
-                        "penalties/liquidated damages), deadlines as YYYY-MM-DD when possible, recommendations, a concrete "
+                        "penalties/liquidated damages), party-specific obligations (payment, notice, insurance, confidentiality), "
+                        "fraud_indicators for missing signatures, inconsistent dates, suspicious terms, or unverified parties, "
+                        "deadlines as YYYY-MM-DD when possible, recommendations, a concrete "
                         "action_plan checklist, and evidence spans with pages when available. "
                         f"Return model_version as `{OPENAI_MODEL}`. Decision support only, not professional advice.\n\n"
                         f"DOCUMENT TEXT:\n{truncated}"
@@ -170,8 +219,14 @@ def analyze_document_text(text: str, filename: str) -> dict[str, Any]:
     return json.loads(response.output_text)
 
 
-def analyze_file(path: Path, filename: str, extracted_text: str | None = None) -> dict[str, Any]:
-    if extracted_text and extracted_text.strip() and not extracted_text.startswith("[Image document:"):
+def analyze_file(path: Path, filename: str, extracted_text: str | None = None, *, force_vision: bool = False) -> dict[str, Any]:
+    if (
+        not force_vision
+        and extracted_text
+        and extracted_text.strip()
+        and not extracted_text.startswith("[Image document:")
+        and not extracted_text.startswith("[OCR fallback:")
+    ):
         return analyze_document_text(extracted_text, filename)
     api = client()
     uploaded = api.files.create(file=path.open("rb"), purpose="user_data")
@@ -187,6 +242,7 @@ def analyze_file(path: Path, filename: str, extracted_text: str | None = None) -
                         "text": (
                             f"Analyze {filename} as DocuGuardian. Extract only evidence present in the document. "
                             "Include entities, clauses with severity, risks with is_penalty for hidden penalties, "
+                            "obligations with party and due dates, fraud_indicators when evidence supports them, "
                             "deadlines, recommendations, action_plan, and evidence. "
                             f"Return model_version as `{OPENAI_MODEL}`."
                         ),
@@ -302,6 +358,7 @@ def answer_question(
     question: str,
     retrieved_chunks: list[dict[str, Any]] | None = None,
     target_language: str | None = None,
+    history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     api = client()
     chunk_context = "\n\n".join(
@@ -324,29 +381,39 @@ def answer_question(
             f" Write both `answer` and every item in `suggested_prompts` in {target_language.strip()}. "
             "Keep source labels in their original language when needed for traceability."
         )
+    llm_input: list[dict[str, str]] = [
+        {
+            "role": "developer",
+            "content": (
+                "You are DocuGuardian. Answer only from the provided report and retrieved document chunks. "
+                "If the answer is not present, say so clearly. Cite concrete source labels. "
+                "Never present legal, medical, or financial advice as certainty. "
+                "Format `answer` in Markdown with short paragraphs, bullet lists for multiple items, "
+                "and **bold** for key terms, dates, and risks. "
+                "Return 2-3 concise follow-up questions in `suggested_prompts` that help the user dig deeper "
+                f"into this specific document. Do not repeat the user's question.{language_instruction}"
+            ),
+        },
+    ]
+    for turn in history or []:
+        role = turn.get("role", "")
+        content = str(turn.get("content", "")).strip()
+        if not content:
+            continue
+        llm_role = "assistant" if role == "assistant" else "user"
+        llm_input.append({"role": llm_role, "content": content})
+    llm_input.append(
+        {
+            "role": "user",
+            "content": (
+                f"Document: {filename}\nExtracted report: {json.dumps(context, ensure_ascii=False)}\n"
+                f"Retrieved chunks:\n{chunk_context or '(none)'}\nQuestion: {question}"
+            ),
+        },
+    )
     response = api.responses.create(
         model=OPENAI_MODEL,
-        input=[
-            {
-                "role": "developer",
-                "content": (
-                    "You are DocuGuardian. Answer only from the provided report and retrieved document chunks. "
-                    "If the answer is not present, say so clearly. Cite concrete source labels. "
-                    "Never present legal, medical, or financial advice as certainty. "
-                    "Format `answer` in Markdown with short paragraphs, bullet lists for multiple items, "
-                    "and **bold** for key terms, dates, and risks. "
-                    "Return 2-3 concise follow-up questions in `suggested_prompts` that help the user dig deeper "
-                    f"into this specific document. Do not repeat the user's question.{language_instruction}"
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Document: {filename}\nExtracted report: {json.dumps(context, ensure_ascii=False)}\n"
-                    f"Retrieved chunks:\n{chunk_context or '(none)'}\nQuestion: {question}"
-                ),
-            },
-        ],
+        input=llm_input,
         text={"format": {"type": "json_schema", "name": "chat_response", "strict": True, "schema": CHAT_RESPONSE_SCHEMA}},
     )
     try:
@@ -413,6 +480,146 @@ def translate_text(text: str, target_language: str) -> str:
         }],
     )
     return response.output_text
+
+
+TRANSLATED_REPORT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "summary": {"type": "string"},
+        "classification": {"type": "string"},
+        "risks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "title": {"type": "string"},
+                    "explanation": {"type": "string"},
+                    "recommendation": {"type": "string"},
+                },
+                "required": ["title", "explanation", "recommendation"],
+            },
+        },
+        "clauses": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"title": {"type": "string"}, "body": {"type": "string"}},
+                "required": ["title", "body"],
+            },
+        },
+        "obligations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"title": {"type": "string"}, "description": {"type": "string"}, "party": {"type": "string"}},
+                "required": ["title", "description", "party"],
+            },
+        },
+        "fraud_indicators": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"title": {"type": "string"}, "explanation": {"type": "string"}},
+                "required": ["title", "explanation"],
+            },
+        },
+        "deadlines": {"type": "array", "items": {"type": "object", "additionalProperties": False, "properties": {"title": {"type": "string"}}, "required": ["title"]}},
+        "recommendations": {"type": "array", "items": {"type": "string"}},
+        "action_plan": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"title": {"type": "string"}, "detail": {"type": "string"}},
+                "required": ["title", "detail"],
+            },
+        },
+    },
+    "required": ["summary", "classification", "risks", "clauses", "obligations", "fraud_indicators", "deadlines", "recommendations", "action_plan"],
+}
+
+
+def translate_report(report: dict[str, Any], target_language: str) -> dict[str, Any]:
+    """Translate user-facing report text while retaining source metadata."""
+    api = client()
+    translatable = {
+        "summary": report.get("summary", ""),
+        "classification": report.get("classification", ""),
+        "risks": [
+            {key: risk.get(key, "") for key in ("title", "explanation", "recommendation")}
+            for risk in report.get("risks", [])
+        ],
+        "clauses": [{"title": clause.get("title", ""), "body": clause.get("body", "")} for clause in report.get("clauses", [])],
+        "obligations": [
+            {"title": item.get("title", ""), "description": item.get("description", ""), "party": item.get("party", "")}
+            for item in report.get("obligations", [])
+        ],
+        "fraud_indicators": [
+            {"title": item.get("title", ""), "explanation": item.get("explanation", "")}
+            for item in report.get("fraud_indicators", [])
+        ],
+        "deadlines": [{"title": deadline.get("title", "")} for deadline in report.get("deadlines", [])],
+        "recommendations": report.get("recommendations", []),
+        "action_plan": [{"title": item.get("title", ""), "detail": item.get("detail", "")} for item in report.get("action_plan", [])],
+    }
+    response = api.responses.create(
+        model=OPENAI_MODEL,
+        input=[{
+            "role": "user",
+            "content": (
+                f"Translate this DocuGuardian report into {target_language}. Translate only human-readable text. "
+                "Keep dates, numbers, severity labels, source citations, and evidence traceability unchanged. "
+                f"Return the same array lengths and order.\n\n{json.dumps(translatable, ensure_ascii=False)}"
+            ),
+        }],
+        text={"format": {"type": "json_schema", "name": "translated_report", "strict": True, "schema": TRANSLATED_REPORT_SCHEMA}},
+    )
+    try:
+        translated = json.loads(response.output_text)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("The translation service returned an invalid report") from error
+
+    result = dict(report)
+    result["summary"] = translated.get("summary", result.get("summary", ""))
+    result["classification"] = translated.get("classification", result.get("classification", ""))
+    original_risks = report.get("risks", [])
+    result["risks"] = [
+        {**risk, **translated_risk}
+        for risk, translated_risk in zip(original_risks, translated.get("risks", []))
+    ]
+    original_clauses = report.get("clauses", [])
+    result["clauses"] = [
+        {**clause, **translated_clause}
+        for clause, translated_clause in zip(original_clauses, translated.get("clauses", []))
+    ]
+    original_obligations = report.get("obligations", [])
+    result["obligations"] = [
+        {**item, **translated_item}
+        for item, translated_item in zip(original_obligations, translated.get("obligations", []))
+    ]
+    original_fraud = report.get("fraud_indicators", [])
+    result["fraud_indicators"] = [
+        {**item, **translated_item}
+        for item, translated_item in zip(original_fraud, translated.get("fraud_indicators", []))
+    ]
+    original_deadlines = report.get("deadlines", [])
+    result["deadlines"] = [
+        {**deadline, **translated_deadline}
+        for deadline, translated_deadline in zip(original_deadlines, translated.get("deadlines", []))
+    ]
+    result["recommendations"] = translated.get("recommendations", result.get("recommendations", []))
+    original_actions = report.get("action_plan", [])
+    result["action_plan"] = [
+        {**item, **translated_item}
+        for item, translated_item in zip(original_actions, translated.get("action_plan", []))
+    ]
+    result["hidden_penalties"] = [risk for risk in result["risks"] if risk.get("is_penalty")]
+    return result
 
 
 def synthesize_speech(text: str) -> bytes:

@@ -50,6 +50,21 @@ def _extract_image_placeholder(path: Path, filename: str) -> str:
     return f"[Image document: {filename}]\nLocal OCR parse prepared file bytes at {path.name}."
 
 
+def is_low_quality_extraction(text: str) -> bool:
+    cleaned = text.strip()
+    if not cleaned:
+        return True
+    if cleaned.startswith("[Image document:"):
+        return True
+    if len(cleaned) < 200:
+        return True
+    printable = sum(1 for char in cleaned if char.isprintable() or char in "\n\r\t")
+    if printable / max(len(cleaned), 1) < 0.85:
+        return True
+    words = re.findall(r"[a-zA-Z]{3,}", cleaned)
+    return len(words) < 20
+
+
 def split_sections(text: str) -> list[dict]:
     if not text.strip():
         return [{"heading": "Document", "content": "", "page": None, "ordinal": 0}]

@@ -44,8 +44,8 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
-      FEATURE_VOICE: ${FEATURE_VOICE:-false}
-      FEATURE_TRANSLATION: ${FEATURE_TRANSLATION:-false}
+      FEATURE_VOICE: ${FEATURE_VOICE:-}
+      FEATURE_TRANSLATION: ${FEATURE_TRANSLATION:-}
       S3_ENDPOINT: http://minio:9000
       S3_BUCKET: docuguardian
       S3_ACCESS_KEY: minioadmin
