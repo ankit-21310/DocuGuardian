@@ -20,6 +20,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from . import ai
+from .report_pdf import render_report_pdf
 from .ai import retrieve_chunks, speech_text_for_language, synthesize_speech, translate_report, translate_text
 from .config import (
     CORS_ORIGINS,
@@ -554,15 +555,45 @@ def update_action_item(
 
 
 @app.get("/api/v1/documents/{document_id}/report/download")
-def download_report(document_id: str, user: dict[str, Any] = Depends(current_user)) -> Response:
+def download_report(
+    document_id: str,
+    format: str = Query(default="pdf", pattern="^(pdf|json)$"),
+    target_language: str | None = Query(default=None, max_length=64),
+    user: dict[str, Any] = Depends(current_user),
+) -> Response:
     document = fetch_document(document_id, user["organization_id"])
     if document["status"] != "completed" or not document["report_json"]:
         raise HTTPException(status_code=409, detail="Report is not ready yet")
+    try:
+        report = json.loads(document["report_json"])
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=503, detail="Document report is unavailable") from error
+
+    if target_language and FEATURE_TRANSLATION:
+        try:
+            report = translate_report(report, target_language)
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    stem = Path(document["name"]).stem
     record_audit(document_id, "report_download", user)
+
+    if format == "json":
+        return Response(
+            content=json.dumps(report, ensure_ascii=False, indent=2),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{stem}-report.json"'},
+        )
+
+    try:
+        pdf_bytes = render_report_pdf(document["name"], report)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"PDF generation failed: {error}") from error
+
     return Response(
-        content=document["report_json"],
-        media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="{Path(document["name"]).stem}-report.json"'},
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{stem}-report.pdf"'},
     )
 
 

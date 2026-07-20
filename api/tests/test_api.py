@@ -301,6 +301,66 @@ def test_reminders_are_scheduled_and_delivered_when_due() -> None:
         assert db.execute("SELECT COUNT(*) FROM notifications WHERE related_deadline_id=?", (deadline_id,)).fetchone()[0] == 1
 
 
+def test_report_download_pdf_default() -> None:
+    report = {
+        "summary": "Sample contract summary.",
+        "classification": "Contract",
+        "risk_score": 55,
+        "risk_level": "medium",
+        "confidence": 0.82,
+        "entities": [{"label": "Party", "value": "Acme Corp", "confidence": 0.9, "page": 1, "text_span": None}],
+        "risks": [{"title": "Auto-renewal", "severity": "medium", "explanation": "Renews automatically.", "recommendation": "Review notice period.", "source": "Section 4", "page": 2, "text_span": "auto-renew", "confidence": 0.8, "is_penalty": False}],
+        "clauses": [],
+        "obligations": [],
+        "fraud_indicators": [],
+        "deadlines": [{"title": "Renewal", "date": "2099-01-01", "priority": "high", "source": "Section 4"}],
+        "recommendations": ["Review renewal terms."],
+        "action_plan": [{"title": "Confirm notice", "detail": "Check calendar", "priority": "high", "due_date": None, "status": "open"}],
+        "evidence": [{"label": "Renewal clause", "page": 2, "text_span": "auto-renew", "confidence": 0.85}],
+    }
+    document_id = _seed_completed_document(report)
+    auth = headers()
+    response = client.get(f"/api/v1/documents/{document_id}/report/download", headers=auth)
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.content[:4] == b"%PDF"
+    assert len(response.content) > 100
+
+
+def test_report_download_json_format() -> None:
+    report = {"summary": "JSON export test.", "classification": "Contract", "risk_score": 40, "risk_level": "medium", "confidence": 0.7, "risks": [], "clauses": [], "deadlines": [], "recommendations": []}
+    document_id = _seed_completed_document(report)
+    auth = headers()
+    response = client.get(f"/api/v1/documents/{document_id}/report/download?format=json", headers=auth)
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
+    payload = response.json()
+    assert payload["summary"] == "JSON export test."
+    assert payload["risk_score"] == 40
+
+
+def test_report_download_with_target_language(monkeypatch) -> None:
+    import app.main as main_module
+
+    captured: dict[str, Any] = {}
+
+    def fake_translate(report: dict[str, Any], target_language: str) -> dict[str, Any]:
+        captured["target_language"] = target_language
+        return {**report, "summary": f"Translated ({target_language})"}
+
+    monkeypatch.setattr(main_module, "translate_report", fake_translate)
+    report = {"summary": "Original summary.", "classification": "Contract", "risk_score": 30, "risk_level": "low", "confidence": 0.6, "risks": [], "clauses": [], "deadlines": [], "recommendations": []}
+    document_id = _seed_completed_document(report)
+    auth = headers()
+    response = client.get(
+        f"/api/v1/documents/{document_id}/report/download?format=pdf&target_language=Hindi",
+        headers=auth,
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert captured.get("target_language") == "Hindi"
+
+
 def test_voice_summary_accepts_target_language(monkeypatch) -> None:
     import app.main as main_module
 

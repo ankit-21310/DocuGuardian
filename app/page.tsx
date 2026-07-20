@@ -519,30 +519,58 @@ function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, fe
 function ReportPanel({ report, reportDoc, token, features, language, languages, t, onToast }: { report: Report | null; reportDoc: DocumentItem | null; token: string; features: Features | null; language: string; languages: string[]; t: (key: import("./i18n/messages").MessageKey) => string; onToast: (message: string) => void }) {
   const [translatedReport, setTranslatedReport] = useState<Report | null>(null);
   const [translating, setTranslating] = useState(false);
+  const [downloadLanguage, setDownloadLanguage] = useState(language);
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [jsonLoading, setJsonLoading] = useState(false);
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [voiceUrl, setVoiceUrl] = useState<string | null>(null);
   const [voiceLanguage, setVoiceLanguage] = useState(language);
+  const [voiceGeneratedLanguage, setVoiceGeneratedLanguage] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
 
   useEffect(() => {
     setTranslatedReport(null);
     setVoiceUrl(null);
+    setVoiceGeneratedLanguage(null);
+    setDownloadLanguage(language);
     setVoiceLanguage(language);
   }, [reportDoc?.id, language]);
 
   useEffect(() => () => { if (voiceUrl) URL.revokeObjectURL(voiceUrl); }, [voiceUrl]);
 
+  useEffect(() => {
+    setVoiceUrl(previous => {
+      if (previous) URL.revokeObjectURL(previous);
+      return null;
+    });
+    setVoiceGeneratedLanguage(null);
+  }, [voiceLanguage]);
+
   if (!report || !reportDoc) return <div className="card workspace-card"><h2>{t("report.title")}</h2><p className="report-summary">{t("report.empty")}</p>{features?.voice ? <p className="voice-empty-hint">{t("report.emptyVoiceHint")}</p> : null}</div>;
   const activeReport = report;
   const activeDoc = reportDoc;
   const displayedReport = translatedReport || activeReport;
+  const voiceReady = Boolean(voiceUrl && voiceGeneratedLanguage === voiceLanguage);
 
-  async function download() {
-    const response = await apiFetch(`/api/v1/documents/${activeDoc.id}/report/download`, token);
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url; link.download = `${activeDoc.name}-report.json`; link.click(); URL.revokeObjectURL(url);
+  async function downloadReport(format: "pdf" | "json") {
+    const loading = format === "pdf" ? setPdfLoading : setJsonLoading;
+    loading(true);
+    try {
+      const params = new URLSearchParams({ format, target_language: downloadLanguage });
+      const response = await apiFetch(`/api/v1/documents/${activeDoc.id}/report/download?${params.toString()}`, token);
+      if (!response.ok) { onToast(format === "pdf" ? "Unable to generate PDF report." : "Unable to download JSON report."); return; }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const extension = format === "pdf" ? "pdf" : "json";
+      link.href = url;
+      link.download = `${activeDoc.name.replace(/\.[^.]+$/, "")}-report.${extension}`;
+      link.click();
+      URL.revokeObjectURL(url);
+      if (format === "pdf") onToast(`${t("report.pdfReady")} (${downloadLanguage}).`);
+    } finally {
+      loading(false);
+    }
   }
 
   async function translateReport() {
@@ -582,7 +610,7 @@ function ReportPanel({ report, reportDoc, token, features, language, languages, 
       const response = await apiFetch("/api/v1/voice-summary", token, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: activeReport.summary, target_language: voiceLanguage }),
+        body: JSON.stringify({ text: displayedReport.summary, target_language: voiceLanguage }),
       });
       if (!response.ok) { onToast("Voice summary is unavailable."); return; }
       const blob = await response.blob();
@@ -592,6 +620,7 @@ function ReportPanel({ report, reportDoc, token, features, language, languages, 
         if (previous) URL.revokeObjectURL(previous);
         return url;
       });
+      setVoiceGeneratedLanguage(voiceLanguage);
       onToast(`Voice summary ready (${spokenLanguage}).`);
       window.setTimeout(() => audioRef.current?.play().catch(() => onToast("Unable to play audio in this browser.")), 0);
     } finally {
@@ -600,11 +629,19 @@ function ReportPanel({ report, reportDoc, token, features, language, languages, 
   }
 
   return <div className="card workspace-card report-panel">
-    <div className="report-header"><h2>{activeDoc.name}</h2><div className="doc-actions"><button className="view" onClick={download}>{t("report.download")}</button>{features?.translation && <button className="view" onClick={translateReport} disabled={translating}>{translating ? t("report.translating") : `${t("report.translate")} ${language}`}</button>}</div></div>
+    <div className="report-header"><h2>{activeDoc.name}</h2><div className="doc-actions">{features?.translation && <button className="view" onClick={translateReport} disabled={translating}>{translating ? t("report.translating") : `${t("report.translate")} ${language}`}</button>}</div></div>
     <div className="metric"><strong>{activeReport.risk_score}</strong><small>{activeReport.risk_level} risk · {activeReport.classification} · confidence {Math.round(activeReport.confidence * 100)}%</small></div>
     {features?.translation && <div className="language-note">Translations use your workspace language from Settings or AI Chat: <strong>{language}</strong></div>}
+    <div className="export-report-panel">
+      <h3>{t("report.exportTitle")}</h3>
+      <p className="muted">{t("report.exportDesc")}</p>
+      <label className="export-language-label">{t("report.downloadLanguage")}<LanguageSelect value={downloadLanguage} languages={languages} onChange={setDownloadLanguage} disabled={pdfLoading || jsonLoading} /></label>
+      <button className="primary report-generate-btn" onClick={() => downloadReport("pdf")} disabled={pdfLoading || jsonLoading}>{pdfLoading ? t("report.generatingPdf") : `${t("report.generatePdf")} (${downloadLanguage})`}</button>
+      {pdfLoading ? <p className="report-generating-status">{t("report.generatingPdf")}</p> : null}
+      <button className="view report-secondary-link" onClick={() => downloadReport("json")} disabled={pdfLoading || jsonLoading}>{jsonLoading ? t("report.generatingPdf") : t("report.downloadJson")}</button>
+    </div>
     <p className="report-summary">{displayedReport.summary}</p>
-    {features?.voice && <div className="voice-summary-panel"><h3>{t("report.voice")}</h3><p className="muted">{t("report.voiceDesc")}</p><label className="voice-language-label">{t("report.voiceLanguage")}<LanguageSelect value={voiceLanguage} languages={languages} onChange={setVoiceLanguage} disabled={voiceLoading} /></label><button className="primary voice-play-btn" onClick={playVoice} disabled={voiceLoading}>{voiceLoading ? t("report.voiceLoading") : `${t("report.voicePlay")} (${voiceLanguage})`}</button>{voiceUrl ? <audio ref={audioRef} className="voice-player" controls src={voiceUrl} /> : null}</div>}
+    {features?.voice && <div className="voice-summary-panel"><h3>{t("report.voice")}</h3><p className="muted">{t("report.voiceDesc")}</p><label className="voice-language-label">{t("report.voiceLanguage")}<LanguageSelect value={voiceLanguage} languages={languages} onChange={setVoiceLanguage} disabled={voiceLoading} /></label>{voiceReady ? <><audio ref={audioRef} className="voice-player" controls src={voiceUrl!} /><button className="view voice-regenerate-link" onClick={playVoice} disabled={voiceLoading}>{voiceLoading ? t("report.voiceGenerating") : t("report.voiceRegenerate")}</button></> : <button className="primary report-generate-btn" onClick={playVoice} disabled={voiceLoading}>{voiceLoading ? t("report.voiceGenerating") : `${t("report.voiceGenerate")} (${voiceLanguage})`}</button>}{voiceLoading ? <p className="report-generating-status">{t("report.voiceGenerating")}</p> : null}</div>}
     {translatedReport && <div className="translation-panel"><h3>Translated report ({language})</h3><p className="report-summary">All report sections are translated while the original source citations remain unchanged.</p></div>}
     <h3>{t("report.keyDetails")}</h3>
     {displayedReport.entities?.length ? displayedReport.entities.map((entity, index) => <div className="finding" key={`entity-${index}`}><div className="finding-top"><strong>{entity.label}</strong><span className="pill low">{entity.value}</span></div><div className="citation">{entity.page ? `page ${entity.page}` : ""}{entity.text_span ? ` · “${entity.text_span}”` : ""}{entity.confidence ? ` · ${Math.round(entity.confidence * 100)}% confidence` : ""}</div></div>) : <p className="muted">{t("report.noEntities")}</p>}
@@ -847,10 +884,21 @@ function DocumentRow({ doc, compact = false }: { doc: DocumentItem; compact?: bo
     {!compact && <div className="status">{doc.status}</div>}
   </>;
 }
-function DeadlineRow({ deadline }: { deadline: Deadline }) { return <div className="deadline-item"><div className="date-box"><strong>{new Date(deadline.due_date).getUTCDate()}</strong>{new Date(deadline.due_date).toLocaleString("en", { month: "short", timeZone: "UTC" }).toUpperCase()}</div><div><div className="deadline-title">{deadline.title}</div><div className="deadline-meta">{formatDate(deadline.due_date)} · {deadline.priority} priority</div></div></div>; }
+function DeadlineRow({ deadline }: { deadline: Deadline }) {
+  const date = parseDate(deadline.due_date);
+  return <div className="deadline-item"><div className="date-box"><strong>{date ? String(date.getUTCDate()) : "—"}</strong>{date ? date.toLocaleString("en", { month: "short", timeZone: "UTC" }).toUpperCase() : "—"}</div><div><div className="deadline-title">{deadline.title}</div><div className="deadline-meta">{formatDate(deadline.due_date)} · {deadline.priority} priority</div></div></div>;
+}
 function ProcessingModal({ processing, onClose }: { processing: { name: string; progress: number; stage: string; stages: Stage[] }; onClose: () => void }) {
   return <div className="upload-modal" role="dialog" aria-modal="true"><div className="modal processing-modal"><div className="modal-head"><h2>Analyzing {processing.name}</h2><button className="close" onClick={onClose} aria-label="Close">×</button></div><div className="processing-body"><div className="drop-icon">✦</div><p>Processing is running in the document pipeline.</p><div className="score-track"><div className="score-fill" style={{ width: `${processing.progress}%` }} /></div><strong>{processing.progress}% · {processing.stage}</strong><div className="stage-list">{processing.stages.map(stage => <div key={stage.stage} className={stage.status}><span>{stage.status === "completed" ? "✓" : stage.status === "running" ? "•" : "○"}</span>{stage.stage}</div>)}</div></div></div></div>;
 }
 function Stat({ icon, label, value, foot, tone }: { icon: string; label: string; value: string; foot: React.ReactNode; tone?: string }) { return <div className="card stat"><div className="stat-top"><span>{label}</span><span className="stat-icon" data-tone={tone}>{icon}</span></div><div className="stat-value">{value}</div><div className="stat-foot">{foot}</div></div>; }
 function EmptyState({ title, text, action, actionLabel }: { title: string; text: string; action?: () => void; actionLabel?: string }) { return <div className="empty-state"><strong>{title}</strong><p>{text}</p>{action && <button className="view" onClick={action}>{actionLabel || "Try again"}</button>}</div>; }
-function formatDate(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString(); }
+function parseDate(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function formatDate(value: string) {
+  const date = parseDate(value);
+  return date ? date.toLocaleDateString() : value || "—";
+}
