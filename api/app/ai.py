@@ -622,7 +622,33 @@ def translate_report(report: dict[str, Any], target_language: str) -> dict[str, 
     return result
 
 
-def synthesize_speech(text: str) -> bytes:
+def _normalize_language(language: str | None) -> str | None:
+    if not language:
+        return None
+    cleaned = language.strip()
+    if cleaned.lower() in {"english", "en"}:
+        return None
+    return cleaned
+
+
+def synthesize_speech(text: str, target_language: str | None = None) -> bytes:
     api = client()
-    speech = api.audio.speech.create(model="gpt-4o-mini-tts", voice="alloy", input=text[:4000])
+    language = _normalize_language(target_language)
+    payload: dict[str, Any] = {
+        "model": "gpt-4o-mini-tts",
+        "voice": "alloy",
+        "input": text[:4000],
+    }
+    if language:
+        payload["instructions"] = f"Speak naturally in {language} with clear pronunciation suitable for a document summary."
+    speech = api.audio.speech.create(**payload)
     return speech.content
+
+
+def speech_text_for_language(text: str, target_language: str | None) -> tuple[str, str | None]:
+    """Return text prepared for TTS and the spoken language label."""
+    language = _normalize_language(target_language)
+    if not language:
+        return text[:4000], None
+    translated = translate_text(text[:4000], language)
+    return translated[:4000], language

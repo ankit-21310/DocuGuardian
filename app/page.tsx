@@ -307,6 +307,12 @@ function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, fe
     apiFetch("/api/v1/audit", token).then(async response => { if (response.ok) setAudit(await response.json()); }).catch(() => undefined);
   }, [active, token]);
 
+  useEffect(() => {
+    if (active !== "Documents" || reportDoc) return;
+    const firstCompleted = docs.find(doc => doc.status === "completed");
+    if (firstCompleted) openReport(firstCompleted);
+  }, [active, docs, reportDoc]);
+
   async function loadSessions() {
     setSessionsLoading(true);
     try {
@@ -513,12 +519,20 @@ function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, fe
 function ReportPanel({ report, reportDoc, token, features, language, languages, t, onToast }: { report: Report | null; reportDoc: DocumentItem | null; token: string; features: Features | null; language: string; languages: string[]; t: (key: import("./i18n/messages").MessageKey) => string; onToast: (message: string) => void }) {
   const [translatedReport, setTranslatedReport] = useState<Report | null>(null);
   const [translating, setTranslating] = useState(false);
+  const [voiceLoading, setVoiceLoading] = useState(false);
+  const [voiceUrl, setVoiceUrl] = useState<string | null>(null);
+  const [voiceLanguage, setVoiceLanguage] = useState(language);
+  const audioRef = useRef<HTMLAudioElement>(null);
 
   useEffect(() => {
     setTranslatedReport(null);
+    setVoiceUrl(null);
+    setVoiceLanguage(language);
   }, [reportDoc?.id, language]);
 
-  if (!report || !reportDoc) return <div className="card workspace-card"><h2>{t("report.title")}</h2><p className="report-summary">{t("report.empty")}</p></div>;
+  useEffect(() => () => { if (voiceUrl) URL.revokeObjectURL(voiceUrl); }, [voiceUrl]);
+
+  if (!report || !reportDoc) return <div className="card workspace-card"><h2>{t("report.title")}</h2><p className="report-summary">{t("report.empty")}</p>{features?.voice ? <p className="voice-empty-hint">{t("report.emptyVoiceHint")}</p> : null}</div>;
   const activeReport = report;
   const activeDoc = reportDoc;
   const displayedReport = translatedReport || activeReport;
@@ -562,20 +576,35 @@ function ReportPanel({ report, reportDoc, token, features, language, languages, 
   }
 
   async function playVoice() {
-    const response = await apiFetch("/api/v1/voice-summary", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: displayedReport.summary }) });
-    if (!response.ok) { onToast("Voice summary is unavailable."); return; }
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    audio.play();
-    onToast("Playing voice summary.");
+    if (voiceLoading) return;
+    setVoiceLoading(true);
+    try {
+      const response = await apiFetch("/api/v1/voice-summary", token, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: activeReport.summary, target_language: voiceLanguage }),
+      });
+      if (!response.ok) { onToast("Voice summary is unavailable."); return; }
+      const blob = await response.blob();
+      const spokenLanguage = response.headers.get("X-Voice-Language") || voiceLanguage;
+      const url = URL.createObjectURL(blob);
+      setVoiceUrl(previous => {
+        if (previous) URL.revokeObjectURL(previous);
+        return url;
+      });
+      onToast(`Voice summary ready (${spokenLanguage}).`);
+      window.setTimeout(() => audioRef.current?.play().catch(() => onToast("Unable to play audio in this browser.")), 0);
+    } finally {
+      setVoiceLoading(false);
+    }
   }
 
   return <div className="card workspace-card report-panel">
-    <div className="report-header"><h2>{activeDoc.name}</h2><div className="doc-actions"><button className="view" onClick={download}>{t("report.download")}</button>{features?.translation && <button className="view" onClick={translateReport} disabled={translating}>{translating ? t("report.translating") : `${t("report.translate")} ${language}`}</button>}{features?.voice && <button className="view" onClick={playVoice}>{t("report.voice")}</button>}</div></div>
+    <div className="report-header"><h2>{activeDoc.name}</h2><div className="doc-actions"><button className="view" onClick={download}>{t("report.download")}</button>{features?.translation && <button className="view" onClick={translateReport} disabled={translating}>{translating ? t("report.translating") : `${t("report.translate")} ${language}`}</button>}</div></div>
     <div className="metric"><strong>{activeReport.risk_score}</strong><small>{activeReport.risk_level} risk · {activeReport.classification} · confidence {Math.round(activeReport.confidence * 100)}%</small></div>
     {features?.translation && <div className="language-note">Translations use your workspace language from Settings or AI Chat: <strong>{language}</strong></div>}
     <p className="report-summary">{displayedReport.summary}</p>
+    {features?.voice && <div className="voice-summary-panel"><h3>{t("report.voice")}</h3><p className="muted">{t("report.voiceDesc")}</p><label className="voice-language-label">{t("report.voiceLanguage")}<LanguageSelect value={voiceLanguage} languages={languages} onChange={setVoiceLanguage} disabled={voiceLoading} /></label><button className="primary voice-play-btn" onClick={playVoice} disabled={voiceLoading}>{voiceLoading ? t("report.voiceLoading") : `${t("report.voicePlay")} (${voiceLanguage})`}</button>{voiceUrl ? <audio ref={audioRef} className="voice-player" controls src={voiceUrl} /> : null}</div>}
     {translatedReport && <div className="translation-panel"><h3>Translated report ({language})</h3><p className="report-summary">All report sections are translated while the original source citations remain unchanged.</p></div>}
     <h3>{t("report.keyDetails")}</h3>
     {displayedReport.entities?.length ? displayedReport.entities.map((entity, index) => <div className="finding" key={`entity-${index}`}><div className="finding-top"><strong>{entity.label}</strong><span className="pill low">{entity.value}</span></div><div className="citation">{entity.page ? `page ${entity.page}` : ""}{entity.text_span ? ` · “${entity.text_span}”` : ""}{entity.confidence ? ` · ${Math.round(entity.confidence * 100)}% confidence` : ""}</div></div>) : <p className="muted">{t("report.noEntities")}</p>}

@@ -20,7 +20,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from . import ai
-from .ai import retrieve_chunks, synthesize_speech, translate_report, translate_text
+from .ai import retrieve_chunks, speech_text_for_language, synthesize_speech, translate_report, translate_text
 from .config import (
     CORS_ORIGINS,
     ENABLE_DEMO_AUTH,
@@ -381,6 +381,7 @@ class ReportTranslationRequest(BaseModel):
 
 class VoiceRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
+    target_language: str | None = Field(default=None, max_length=64)
 
 
 @app.post("/api/v1/auth/demo")
@@ -1095,12 +1096,14 @@ def voice_summary(request: VoiceRequest, user: dict[str, Any] = Depends(current_
     if not FEATURE_VOICE:
         raise HTTPException(status_code=404, detail="Voice summary is disabled")
     try:
-        audio = synthesize_speech(request.text)
+        spoken_text, spoken_language = speech_text_for_language(request.text, request.target_language)
+        audio = synthesize_speech(spoken_text, request.target_language)
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error))
     except Exception as error:
         raise HTTPException(status_code=503, detail=f"Voice synthesis unavailable: {error}")
-    return Response(content=audio, media_type="audio/mpeg")
+    headers = {"X-Voice-Language": spoken_language or "English"}
+    return Response(content=audio, media_type="audio/mpeg", headers=headers)
 
 
 def process_document(document_id: str, organization_id: str, user: dict[str, Any]) -> None:

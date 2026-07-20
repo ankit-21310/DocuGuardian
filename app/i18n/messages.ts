@@ -3,7 +3,7 @@ export type MessageKey =
   | "workspace" | "signOut" | "uploadDocument" | "loadingWorkspace"
   | "dashboard.greetingMorning" | "dashboard.greetingAfternoon" | "dashboard.greetingEvening" | "dashboard.subtitle"
   | "stat.documents" | "stat.highRisk" | "stat.deadlines" | "stat.protection" | "stat.fraudFlags"
-  | "report.title" | "report.empty" | "report.download" | "report.translate" | "report.translating" | "report.voice"
+  | "report.title" | "report.empty" | "report.emptyVoiceHint" | "report.download" | "report.translate" | "report.translating" | "report.voice" | "report.voiceDesc" | "report.voiceLoading" | "report.voicePlay" | "report.voiceLanguage"
   | "report.riskAnalysis" | "report.hiddenPenalties" | "report.clauses" | "report.keyDetails" | "report.obligations"
   | "report.fraudIndicators" | "report.fraudDisclaimer" | "report.deadlines" | "report.actionPlan" | "report.recommendations"
   | "report.evidence" | "report.noRisks" | "report.noPenalties" | "report.noClauses" | "report.noEntities"
@@ -57,10 +57,15 @@ const en: Record<MessageKey, string> = {
   "stat.fraudFlags": "Fraud-flagged documents",
   "report.title": "Intelligence report",
   "report.empty": "Select an analyzed document to review its summary, risks, clauses, obligations, deadlines, action plan, and source evidence.",
+  "report.emptyVoiceHint": "Click Report → on a completed document. A Voice summary player will appear at the top of the report.",
   "report.download": "Download report",
   "report.translate": "Translate to",
   "report.translating": "Translating…",
   "report.voice": "Voice summary",
+  "report.voiceDesc": "Listen to the plain-language summary read aloud in your chosen language.",
+  "report.voiceLoading": "Generating audio…",
+  "report.voicePlay": "Play voice summary",
+  "report.voiceLanguage": "Voice language",
   "report.riskAnalysis": "Risk analysis",
   "report.hiddenPenalties": "Hidden penalties",
   "report.clauses": "Clauses",

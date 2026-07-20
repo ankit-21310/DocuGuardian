@@ -301,6 +301,30 @@ def test_reminders_are_scheduled_and_delivered_when_due() -> None:
         assert db.execute("SELECT COUNT(*) FROM notifications WHERE related_deadline_id=?", (deadline_id,)).fetchone()[0] == 1
 
 
+def test_voice_summary_accepts_target_language(monkeypatch) -> None:
+    import app.main as main_module
+
+    captured: dict[str, Any] = {}
+
+    def fake_speech(text: str, target_language: str | None = None) -> tuple[str, str | None]:
+        captured["text"] = text
+        captured["target_language"] = target_language
+        return text, target_language
+
+    monkeypatch.setattr(main_module, "speech_text_for_language", fake_speech)
+    monkeypatch.setattr(main_module, "synthesize_speech", lambda text, target_language=None: b"audio-bytes")
+
+    response = client.post(
+        "/api/v1/voice-summary",
+        headers=headers(),
+        json={"text": "This is a summary.", "target_language": "Hindi"},
+    )
+    assert response.status_code == 200
+    assert response.content == b"audio-bytes"
+    assert response.headers["x-voice-language"] == "Hindi"
+    assert captured["target_language"] == "Hindi"
+
+
 def test_comparison_reports_score_delta_and_semantic_clause_changes() -> None:
     first = _seed_completed_document({"risk_score": 30, "risk_level": "low", "risks": [], "clauses": [{"title": "Termination", "body": "Thirty days notice.", "severity": "low", "category": "termination"}], "deadlines": []})
     second = _seed_completed_document({"risk_score": 70, "risk_level": "high", "risks": [{"title": "Late fee"}], "clauses": [{"title": "Termination of agreement", "body": "Seven days notice.", "severity": "high", "category": "termination"}], "deadlines": []})
