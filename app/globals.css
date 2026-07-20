@@ -82,7 +82,11 @@ h1,h2,h3,p { margin-top:0; } h1 { font:800 27px 'Manrope'; letter-spacing:-1px; 
 .report-panel { max-height:calc(100vh - 190px); overflow:auto; }
 .report-header { display:flex; justify-content:space-between; align-items:center; gap:14px; }
 .report-header h2 { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.chat-toolbar { padding:16px 22px; border-bottom:1px solid var(--line); }
+.chat-toolbar { padding:16px 22px; border-bottom:1px solid var(--line); display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }
+.chat-toolbar select,.language-select { margin-top:6px; width:100%; border:1px solid var(--line); border-radius:9px; padding:11px 12px; outline:0; color:var(--ink); background:#fff; font-size:12px; }
+.language-note { font-size:11px; color:#8a97ad; margin:0 0 12px; }
+.translation-panel { margin-bottom:18px; }
+.translation-panel h3 { font:700 13px 'Manrope'; margin:0 0 8px; color:#334155; }
 .chat-toolbar select { margin-top:6px; }
 .disclaimer { font-size:10px; color:#98a5b5; line-height:1.5; margin-top:18px; }
 .citation { color:var(--blue); font-size:10px; display:block; margin-top:8px; font-weight:700; }

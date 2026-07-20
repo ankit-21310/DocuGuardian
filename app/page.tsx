@@ -319,6 +319,11 @@ function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, fe
 function ReportPanel({ report, reportDoc, token, features, language, languages, onToast }: { report: Report | null; reportDoc: DocumentItem | null; token: string; features: Features | null; language: string; languages: string[]; onToast: (message: string) => void }) {
   const [translation, setTranslation] = useState("");
   const [translating, setTranslating] = useState(false);
+
+  useEffect(() => {
+    setTranslation("");
+  }, [reportDoc?.id, language]);
+
   if (!report || !reportDoc) return <div className="card workspace-card"><h2>Intelligence report</h2><p className="report-summary">Select an analyzed document to review its summary, risks, clauses, deadlines, action plan, and source evidence.</p></div>;
   const activeReport = report;
   const activeDoc = reportDoc;

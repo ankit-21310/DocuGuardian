@@ -48,7 +48,9 @@ def test_features_endpoint() -> None:
     response = client.get("/api/v1/features")
     assert response.status_code == 200
     assert "pipeline_stages" in response.json()
+    assert "supported_languages" in response.json()
     assert len(response.json()["pipeline_stages"]) >= 8
+    assert len(response.json()["supported_languages"]) >= 2
 
 
 def test_notifications_require_auth() -> None:
