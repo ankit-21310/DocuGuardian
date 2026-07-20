@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -31,6 +33,40 @@ MICROSOFT_SCOPE = "Calendars.ReadWrite offline_access"
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def create_oauth_state(organization_id: str, user_id: str, provider: str) -> str:
+    """Create a short-lived, single-use state bound to the initiating user."""
+    state = secrets.token_urlsafe(32)
+    state_hash = hashlib.sha256(state.encode()).hexdigest()
+    created = datetime.now(timezone.utc)
+    expires = (created + timedelta(minutes=10)).isoformat()
+    with DB_LOCK, connect() as db:
+        db.execute(
+            "INSERT INTO calendar_oauth_states (state_hash,organization_id,user_id,provider,expires_at,created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (state_hash, organization_id, user_id, provider, expires, created.isoformat()),
+        )
+    return state
+
+
+def consume_oauth_state(state: str, provider: str) -> dict[str, str] | None:
+    """Atomically validate and consume an OAuth state value."""
+    state_hash = hashlib.sha256(state.encode()).hexdigest()
+    with DB_LOCK, connect() as db:
+        row = fetchone(db.execute(
+            "SELECT organization_id,user_id,provider,expires_at FROM calendar_oauth_states WHERE state_hash=?",
+            (state_hash,),
+        ))
+        if not row or row["provider"] != provider:
+            return None
+        try:
+            expired = datetime.fromisoformat(str(row["expires_at"]).replace("Z", "+00:00")) <= datetime.now(timezone.utc)
+        except ValueError:
+            expired = True
+        db.execute("DELETE FROM calendar_oauth_states WHERE state_hash=?", (state_hash,))
+        if expired:
+            return None
+        return {"organization_id": row["organization_id"], "user_id": row["user_id"], "provider": row["provider"]}
 
 
 def is_configured() -> bool:
@@ -264,7 +300,7 @@ def _event_body(deadline: dict[str, Any], document_name: str | None = None) -> d
         "summary": title,
         "description": f"DocuGuardian deadline from {document_name or 'document'} · {deadline.get('source', 'Document evidence')}",
         "start": {"date": due_date},
-        "end": {"date": due_date},
+        "end": {"date": (datetime.strptime(due_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")},
     }
 
 
@@ -324,7 +360,7 @@ def _upsert_outlook_event(integration: dict[str, Any], deadline: dict[str, Any],
     return response.json()["id"]
 
 
-def sync_deadline_for_org(deadline_id: str, organization_id: str) -> int:
+def sync_deadline_for_org(deadline_id: str, organization_id: str, user_id: str | None = None) -> int:
     if not is_configured():
         return 0
     with connect() as db:
@@ -335,10 +371,12 @@ def sync_deadline_for_org(deadline_id: str, organization_id: str) -> int:
         ))
         if not deadline:
             return 0
-        integrations = fetchall(db.execute(
-            "SELECT * FROM calendar_integrations WHERE organization_id=? AND auto_sync=1",
-            (organization_id,),
-        ))
+        integration_sql = "SELECT * FROM calendar_integrations WHERE organization_id=? AND auto_sync=1"
+        integration_params: tuple[Any, ...] = (organization_id,)
+        if user_id:
+            integration_sql += " AND user_id=?"
+            integration_params += (user_id,)
+        integrations = fetchall(db.execute(integration_sql, integration_params))
     synced = 0
     for integration in integrations:
         try:
@@ -384,7 +422,7 @@ def sync_organization_deadlines(organization_id: str, user_id: str) -> dict[str,
         return {"synced": 0, "message": "Connect Google or Outlook first"}
     total = 0
     for row in deadlines:
-        total += sync_deadline_for_org(row["id"], organization_id)
+        total += sync_deadline_for_org(row["id"], organization_id, user_id)
     return {"synced": total, "message": f"Synced {total} deadline event(s)"}
 
 
@@ -397,6 +435,57 @@ def sync_document_deadlines(document_id: str, organization_id: str) -> int:
     for row in rows:
         total += sync_deadline_for_org(row["id"], organization_id)
     return total
+
+
+def _delete_google_event(integration: dict[str, Any], external_event_id: str) -> None:
+    token = _access_token(integration)
+    calendar_id = integration.get("calendar_id") or "primary"
+    response = httpx.delete(
+        f"https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events/{external_event_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=20,
+    )
+    if response.status_code not in {200, 204, 404}:
+        response.raise_for_status()
+
+
+def _delete_outlook_event(integration: dict[str, Any], external_event_id: str) -> None:
+    token = _access_token(integration)
+    response = httpx.delete(
+        f"https://graph.microsoft.com/v1.0/me/events/{external_event_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=20,
+    )
+    if response.status_code not in {200, 204, 404}:
+        response.raise_for_status()
+
+
+def delete_document_events(document_id: str, organization_id: str) -> int:
+    """Remove provider events before their deadline rows are regenerated."""
+    with connect() as db:
+        mappings = fetchall(db.execute(
+            "SELECT m.id,m.external_event_id,i.*,d.id AS deadline_id FROM calendar_sync_map m "
+            "JOIN calendar_integrations i ON i.id=m.integration_id "
+            "JOIN deadlines d ON d.id=m.deadline_id "
+            "WHERE d.document_id=? AND i.organization_id=?",
+            (document_id, organization_id),
+        ))
+    deleted = 0
+    for mapping in mappings:
+        try:
+            if mapping["provider"] == "google":
+                _delete_google_event(mapping, mapping["external_event_id"])
+            else:
+                _delete_outlook_event(mapping, mapping["external_event_id"])
+            deleted += 1
+        except Exception:
+            continue
+    with DB_LOCK, connect() as db:
+        db.execute(
+            "DELETE FROM calendar_sync_map WHERE deadline_id IN (SELECT id FROM deadlines WHERE document_id=?)",
+            (document_id,),
+        )
+    return deleted
 
 
 def settings_redirect(status: str, provider: str) -> str:

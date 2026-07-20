@@ -215,6 +215,12 @@ CREATE TABLE IF NOT EXISTS calendar_sync_map (
   FOREIGN KEY(deadline_id) REFERENCES deadlines(id) ON DELETE CASCADE,
   FOREIGN KEY(integration_id) REFERENCES calendar_integrations(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS calendar_oauth_states (
+  state_hash TEXT PRIMARY KEY, organization_id TEXT NOT NULL, user_id TEXT NOT NULL,
+  provider TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL,
+  FOREIGN KEY(user_id) REFERENCES users(id),
+  FOREIGN KEY(organization_id) REFERENCES organizations(id)
+);
 CREATE TABLE IF NOT EXISTS action_items (
   id TEXT PRIMARY KEY, document_id TEXT NOT NULL, title TEXT NOT NULL,
   detail TEXT NOT NULL, priority TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',

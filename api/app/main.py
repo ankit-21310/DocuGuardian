@@ -115,6 +115,7 @@ def init_db() -> None:
     with connect() as db:
         db.executescript(SCHEMA_SQL)
         _migrate_columns(db)
+        _backfill_legacy_data(db)
         db.execute(
             "UPDATE documents SET status='completed', updated_at=? WHERE status='processing' AND stage='Complete' AND report_json IS NOT NULL",
             (now(),),
@@ -185,6 +186,70 @@ def _migrate_columns(db) -> None:
         db.execute("ALTER TABLE chat_messages ADD COLUMN session_id TEXT")
 
 
+def _backfill_legacy_data(db) -> None:
+    """Make pre-session chats and pre-ID action plans usable after upgrades."""
+    legacy_pairs = fetchall(db.execute(
+        "SELECT DISTINCT user_id,document_id FROM chat_messages WHERE session_id IS NULL"
+    ))
+    for pair in legacy_pairs:
+        messages = fetchall(db.execute(
+            "SELECT id,content,created_at FROM chat_messages WHERE user_id=? AND document_id=? AND session_id IS NULL ORDER BY created_at ASC",
+            (pair["user_id"], pair["document_id"]),
+        ))
+        if not messages:
+            continue
+        session_id = str(uuid.uuid4())
+        created_at = messages[0]["created_at"]
+        updated_at = messages[-1]["created_at"]
+        first_message = str(messages[0].get("content") or "Imported chat")
+        db.execute(
+            "INSERT INTO chat_sessions (id,user_id,document_id,title,created_at,updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, pair["user_id"], pair["document_id"], _session_title(first_message), created_at, updated_at),
+        )
+        for message in messages:
+            db.execute("UPDATE chat_messages SET session_id=? WHERE id=?", (session_id, message["id"]))
+
+    documents = fetchall(db.execute(
+        "SELECT id,report_json FROM documents WHERE report_json IS NOT NULL"
+    ))
+    for document in documents:
+        try:
+            report = json.loads(document["report_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        action_plan = report.get("action_plan")
+        if not isinstance(action_plan, list) or not action_plan:
+            continue
+        items = fetchall(db.execute(
+            "SELECT id,title,detail,priority,due_date,status FROM action_items WHERE document_id=? ORDER BY ordinal",
+            (document["id"],),
+        ))
+        changed = False
+        for ordinal, action in enumerate(action_plan):
+            if not isinstance(action, dict):
+                continue
+            item = items[ordinal] if ordinal < len(items) else None
+            if item is None:
+                item_id = str(uuid.uuid4())
+                db.execute(
+                    "INSERT INTO action_items (id,document_id,title,detail,priority,status,due_date,ordinal) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (item_id, document["id"], action.get("title", "Action"), action.get("detail", ""), action.get("priority", "medium"), action.get("status", "open"), action.get("due_date"), ordinal),
+                )
+                item = {"id": item_id, "status": action.get("status", "open")}
+                items.append(item)
+            if not action.get("id"):
+                action["id"] = item["id"]
+                changed = True
+            if item.get("status") and action.get("status") != item["status"]:
+                action["status"] = item["status"]
+                changed = True
+        if changed:
+            db.execute(
+                "UPDATE documents SET report_json=?, updated_at=? WHERE id=?",
+                (json.dumps(report), now(), document["id"]),
+            )
+
+
 @app.on_event("startup")
 def startup() -> None:
     init_db()
@@ -242,8 +307,16 @@ def row_document(row: dict[str, Any]) -> dict[str, Any]:
     item.pop("organization_id", None)
     item.pop("extracted_text", None)
     report_json = item.pop("report_json", None)
-    item["report"] = json.loads(report_json) if report_json else None
+    item["report"] = filter_report_features(json.loads(report_json)) if report_json else None
     return item
+
+
+def filter_report_features(report: dict[str, Any]) -> dict[str, Any]:
+    """Keep disabled feature data out of API responses and exports."""
+    filtered = dict(report)
+    if not FEATURE_FRAUD:
+        filtered["fraud_indicators"] = []
+    return filtered
 
 
 def fetch_document(document_id: str, organization_id: str) -> dict[str, Any]:
@@ -515,7 +588,7 @@ def document_report(document_id: str, user: dict[str, Any] = Depends(current_use
     document = fetch_document(document_id, user["organization_id"])
     if document["status"] != "completed":
         raise HTTPException(status_code=409, detail="Report is not ready yet")
-    return json.loads(document["report_json"]) if document["report_json"] else {}
+    return filter_report_features(json.loads(document["report_json"])) if document["report_json"] else {}
 
 
 @app.patch("/api/v1/action-items/{action_item_id}")
@@ -565,7 +638,7 @@ def download_report(
     if document["status"] != "completed" or not document["report_json"]:
         raise HTTPException(status_code=409, detail="Report is not ready yet")
     try:
-        report = json.loads(document["report_json"])
+        report = filter_report_features(json.loads(document["report_json"]))
     except json.JSONDecodeError as error:
         raise HTTPException(status_code=503, detail="Document report is unavailable") from error
 
@@ -693,7 +766,7 @@ def chat(document_id: str, request: ChatRequest, user: dict[str, Any] = Depends(
     if document["status"] != "completed":
         raise HTTPException(status_code=409, detail="Chat is available after analysis completes")
     try:
-        report = json.loads(document["report_json"]) if document["report_json"] else {}
+        report = filter_report_features(json.loads(document["report_json"])) if document["report_json"] else {}
     except json.JSONDecodeError:
         raise HTTPException(status_code=503, detail="Document report is unavailable")
     with connect() as db:
@@ -813,16 +886,14 @@ def analytics(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
                 "SELECT substr(created_at, 1, 7) AS month, COUNT(*) AS count FROM documents WHERE organization_id=? GROUP BY 1 ORDER BY 1 DESC LIMIT 6",
                 (org,),
             ))
-    protection = max(0, 100 - round(average))
-    fraud_docs = 0
-    try:
-        fraud_docs = fetchone(db.execute(
-            "SELECT COUNT(DISTINCT f.document_id) AS count FROM document_fraud_indicators f "
-            "JOIN documents doc ON doc.id=f.document_id WHERE doc.organization_id=? AND f.severity='high'",
-            (org,),
-        ))["count"]
-    except Exception:
         fraud_docs = 0
+        if FEATURE_FRAUD:
+            fraud_docs = fetchone(db.execute(
+                "SELECT COUNT(DISTINCT f.document_id) AS count FROM document_fraud_indicators f "
+                "JOIN documents doc ON doc.id=f.document_id WHERE doc.organization_id=? AND f.severity='high'",
+                (org,),
+            ))["count"]
+    protection = max(0, 100 - round(average))
     return {
         "documents_uploaded": total,
         "high_risk_documents": high,
@@ -921,8 +992,8 @@ def compare_documents(request: ComparisonRequest, user: dict[str, Any] = Depends
     second = fetch_document(request.document_b_id, user["organization_id"])
     if first["status"] != "completed" or second["status"] != "completed":
         raise HTTPException(status_code=409, detail="Both documents must finish analysis before comparison")
-    first_report = json.loads(first["report_json"] or "{}")
-    second_report = json.loads(second["report_json"] or "{}")
+    first_report = filter_report_features(json.loads(first["report_json"] or "{}"))
+    second_report = filter_report_features(json.loads(second["report_json"] or "{}"))
     def normalized(value: Any) -> str:
         return " ".join("".join(character.lower() if character.isalnum() else " " for character in str(value or "")).split())
 
@@ -1036,14 +1107,16 @@ def calendar_status(user: dict[str, Any] = Depends(current_user)) -> dict[str, A
 def calendar_google_authorize(user: dict[str, Any] = Depends(current_user)) -> dict[str, str]:
     if not FEATURE_EXTERNAL_CALENDAR or not GOOGLE_CLIENT_ID:
         raise HTTPException(status_code=404, detail="Google Calendar integration is not configured")
-    state = base64.urlsafe_b64encode(json.dumps({"user_id": user["id"], "organization_id": user["organization_id"]}).encode()).decode()
+    state = calendar_sync.create_oauth_state(user["organization_id"], user["id"], "google")
     return {"authorization_url": calendar_sync.google_authorize_url(state)}
 
 
 @app.get("/api/v1/integrations/calendar/google/callback")
 def calendar_google_callback(code: str = Query(...), state: str = Query(...)) -> RedirectResponse:
     try:
-        payload = json.loads(base64.urlsafe_b64decode(state.encode()).decode())
+        payload = calendar_sync.consume_oauth_state(state, "google")
+        if not payload:
+            raise ValueError("Invalid or expired OAuth state")
         calendar_sync.complete_google_oauth(code, payload["organization_id"], payload["user_id"])
         return RedirectResponse(calendar_sync.settings_redirect("connected", "google"))
     except Exception:
@@ -1054,14 +1127,16 @@ def calendar_google_callback(code: str = Query(...), state: str = Query(...)) ->
 def calendar_outlook_authorize(user: dict[str, Any] = Depends(current_user)) -> dict[str, str]:
     if not FEATURE_EXTERNAL_CALENDAR or not MICROSOFT_CLIENT_ID:
         raise HTTPException(status_code=404, detail="Outlook Calendar integration is not configured")
-    state = base64.urlsafe_b64encode(json.dumps({"user_id": user["id"], "organization_id": user["organization_id"]}).encode()).decode()
+    state = calendar_sync.create_oauth_state(user["organization_id"], user["id"], "outlook")
     return {"authorization_url": calendar_sync.outlook_authorize_url(state)}
 
 
 @app.get("/api/v1/integrations/calendar/outlook/callback")
 def calendar_outlook_callback(code: str = Query(...), state: str = Query(...)) -> RedirectResponse:
     try:
-        payload = json.loads(base64.urlsafe_b64decode(state.encode()).decode())
+        payload = calendar_sync.consume_oauth_state(state, "outlook")
+        if not payload:
+            raise ValueError("Invalid or expired OAuth state")
         calendar_sync.complete_outlook_oauth(code, payload["organization_id"], payload["user_id"])
         return RedirectResponse(calendar_sync.settings_redirect("connected", "outlook"))
     except Exception:
@@ -1112,7 +1187,7 @@ def translate_document_report(
     if document["status"] != "completed" or not document["report_json"]:
         raise HTTPException(status_code=409, detail="Report is not ready yet")
     try:
-        report = json.loads(document["report_json"])
+        report = filter_report_features(json.loads(document["report_json"]))
         translated = translate_report(report, request.target_language)
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error))

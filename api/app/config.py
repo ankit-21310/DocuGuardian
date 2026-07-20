@@ -72,7 +72,7 @@ def _service_feature_enabled(name: str) -> bool:
 
 FEATURE_VOICE = _service_feature_enabled("FEATURE_VOICE")
 FEATURE_TRANSLATION = _service_feature_enabled("FEATURE_TRANSLATION")
-FEATURE_FRAUD = _service_feature_enabled("FEATURE_FRAUD")
+FEATURE_FRAUD = os.getenv("FEATURE_FRAUD", "false").strip().lower() in {"1", "true", "yes", "on"}
 FEATURE_EXTERNAL_CALENDAR = os.getenv("FEATURE_EXTERNAL_CALENDAR", "").strip().lower() in {"1", "true", "yes", "on"}
 SUPPORTED_LANGUAGES = tuple(
     language.strip()

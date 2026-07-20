@@ -395,3 +395,91 @@ def test_comparison_reports_score_delta_and_semantic_clause_changes() -> None:
     assert payload["risk_level_changed"] is True
     assert payload["modified_clauses"][0]["severity_changed"] is True
     assert payload["added_risks"] == ["Late fee"]
+
+
+def test_calendar_oauth_state_is_bound_and_single_use() -> None:
+    from app import calendar_sync
+
+    state = calendar_sync.create_oauth_state("demo-org", "demo-user", "google")
+    assert calendar_sync.consume_oauth_state(state, "outlook") is None
+    assert calendar_sync.consume_oauth_state(state, "google") == {
+        "organization_id": "demo-org",
+        "user_id": "demo-user",
+        "provider": "google",
+    }
+    assert calendar_sync.consume_oauth_state(state, "google") is None
+
+
+def test_google_all_day_event_uses_exclusive_end_date() -> None:
+    from app.calendar_sync import _event_body
+
+    body = _event_body({"title": "Renewal", "due_date": "2099-01-20"})
+    assert body["start"]["date"] == "2099-01-20"
+    assert body["end"]["date"] == "2099-01-21"
+
+
+def test_manual_calendar_sync_only_uses_requesting_users_integration(monkeypatch) -> None:
+    from app import calendar_sync
+
+    document_id = _seed_completed_document({"risk_score": 20, "risk_level": "low", "risks": [], "clauses": [], "deadlines": []})
+    deadline_id = str(uuid.uuid4())
+    integration_one = str(uuid.uuid4())
+    integration_two = str(uuid.uuid4())
+    requesting_user = str(uuid.uuid4())
+    other_user = str(uuid.uuid4())
+    timestamp = datetime.now(timezone.utc).isoformat()
+    with connect() as db:
+        db.execute("INSERT INTO users (id,email,name,password_hash,role,created_at) VALUES (?, ?, ?, ?, ?, ?)", (requesting_user, f"calendar-{requesting_user[:8]}@example.com", "Requesting User", "test", "Member", timestamp))
+        db.execute("INSERT INTO memberships (user_id,organization_id,role) VALUES (?, ?, ?)", (requesting_user, "demo-org", "Member"))
+        db.execute("INSERT INTO users (id,email,name,password_hash,role,created_at) VALUES (?, ?, ?, ?, ?, ?)", (other_user, f"calendar-{other_user[:8]}@example.com", "Calendar User", "test", "Member", timestamp))
+        db.execute("INSERT INTO memberships (user_id,organization_id,role) VALUES (?, ?, ?)", (other_user, "demo-org", "Member"))
+        db.execute("INSERT INTO deadlines (id,document_id,title,due_date,priority,source,timezone) VALUES (?, ?, ?, ?, ?, ?, ?)", (deadline_id, document_id, "Renewal", "2099-01-20", "high", "Page 1", "UTC"))
+        db.execute("INSERT INTO calendar_integrations (id,organization_id,user_id,provider,access_token,refresh_token,expires_at,calendar_id,auto_sync,last_sync_at,created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (integration_one, "demo-org", requesting_user, "google", "token", None, None, "primary", 1, None, timestamp))
+        db.execute("INSERT INTO calendar_integrations (id,organization_id,user_id,provider,access_token,refresh_token,expires_at,calendar_id,auto_sync,last_sync_at,created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (integration_two, "demo-org", other_user, "google", "token", None, None, "primary", 1, None, timestamp))
+    captured: list[str] = []
+    monkeypatch.setattr(calendar_sync, "is_configured", lambda: True)
+    monkeypatch.setattr(calendar_sync, "_upsert_google_event", lambda integration, deadline, external_event_id, document_name: captured.append(integration["user_id"]) or f"event-{integration['id']}")
+    result = calendar_sync.sync_organization_deadlines("demo-org", requesting_user)
+    assert result["synced"] == len(captured)
+    assert result["synced"] > 0
+    assert set(captured) == {requesting_user}
+
+
+def test_analytics_counts_high_fraud_documents_inside_transaction(monkeypatch) -> None:
+    import app.main as main_module
+
+    document_id = _seed_completed_document({"risk_score": 60, "risk_level": "medium", "risks": [], "clauses": [], "deadlines": []})
+    with connect() as db:
+        db.execute("INSERT INTO document_fraud_indicators (id,document_id,title,indicator_type,severity,explanation,page,text_span,confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (str(uuid.uuid4()), document_id, "Suspicious wording", "wording", "high", "Test indicator", 1, "test", 0.9))
+    monkeypatch.setattr(main_module, "FEATURE_FRAUD", True)
+    response = client.get("/api/v1/analytics/overview", headers=headers())
+    assert response.status_code == 200
+    assert response.json()["fraud_flagged_documents"] >= 1
+
+
+def test_fraud_report_data_is_gated_when_feature_disabled(monkeypatch) -> None:
+    import app.pipeline_runner as pipeline_runner
+
+    document_id = _seed_completed_document({"risk_score": 30, "risk_level": "low", "risks": [], "clauses": [], "deadlines": []})
+    with connect() as db:
+        db.execute("INSERT INTO document_fraud_indicators (id,document_id,title,indicator_type,severity,explanation,page,text_span,confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (str(uuid.uuid4()), document_id, "Suspicious wording", "wording", "high", "Test indicator", 1, "test", 0.9))
+    monkeypatch.setattr(pipeline_runner, "FEATURE_FRAUD", False)
+    report = pipeline_runner._assemble_report(document_id, {"fraud_indicators": [{"title": "Should be hidden"}]})
+    assert report["fraud_indicators"] == []
+
+
+def test_init_db_backfills_legacy_chat_sessions_and_action_ids() -> None:
+    document_id = _seed_completed_document({"summary": "Legacy", "action_plan": [{"title": "Review", "detail": "Review it", "priority": "high", "due_date": None}], "risks": [], "clauses": [], "deadlines": []})
+    action_id = str(uuid.uuid4())
+    message_id = str(uuid.uuid4())
+    timestamp = datetime.now(timezone.utc).isoformat()
+    with connect() as db:
+        db.execute("INSERT INTO action_items (id,document_id,title,detail,priority,status,due_date,ordinal) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (action_id, document_id, "Review", "Review it", "high", "open", None, 0))
+        db.execute("INSERT INTO chat_messages (id,document_id,user_id,role,content,citations_json,created_at,session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (message_id, document_id, "demo-user", "user", "Legacy question", None, timestamp, None))
+    init_db()
+    with connect() as db:
+        report = json.loads(db.execute("SELECT report_json FROM documents WHERE id=?", (document_id,)).fetchone()[0])
+        assert report["action_plan"][0]["id"] == action_id
+        session_id = db.execute("SELECT session_id FROM chat_messages WHERE id=?", (message_id,)).fetchone()[0]
+        assert session_id
+        assert db.execute("SELECT COUNT(*) FROM chat_sessions WHERE id=?", (session_id,)).fetchone()[0] == 1

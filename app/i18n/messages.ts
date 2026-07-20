@@ -8,7 +8,7 @@ export type MessageKey =
   | "page.documents.title" | "page.documents.subtitle" | "page.chat.title" | "page.chat.subtitle"
   | "page.calendar.title" | "page.calendar.subtitle" | "page.compare.title" | "page.compare.subtitle"
   | "page.analytics.title" | "page.analytics.subtitle" | "page.settings.title" | "page.settings.subtitle"
-  | "stat.documents" | "stat.highRisk" | "stat.deadlines" | "stat.protection" | "stat.fraudFlags"
+  | "stat.documents" | "stat.highRisk" | "stat.mediumRisk" | "stat.lowRisk" | "stat.deadlines" | "stat.protection" | "stat.fraudFlags"
   | "stat.foot.documents" | "stat.foot.highRisk" | "stat.foot.deadlines" | "stat.foot.fraud" | "stat.foot.protection"
   | "documents.all" | "documents.viewReport" | "documents.report" | "documents.retry" | "documents.delete"
   | "documents.empty" | "documents.emptyHint"
@@ -91,6 +91,8 @@ const en: Record<MessageKey, string> = {
   "page.settings.subtitle": "Account, notifications, and organization context.",
   "stat.documents": "Documents uploaded",
   "stat.highRisk": "High risk documents",
+  "stat.mediumRisk": "Medium risk documents",
+  "stat.lowRisk": "Low risk documents",
   "stat.deadlines": "Upcoming deadlines",
   "stat.protection": "Protection score",
   "stat.fraudFlags": "Fraud-flagged documents",

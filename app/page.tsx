@@ -34,6 +34,8 @@ type ChatSessionItem = {
 };
 type Session = { token: string; user: User };
 type Features = { voice: boolean; translation: boolean; fraud?: boolean; external_calendar?: boolean; demo_auth: boolean; pipeline_stages: string[]; supported_languages?: string[]; language_options?: Array<{ label: string; code: string }> };
+type LandingFeature = { title: string; short: string; detail: string; example: string; stage: string; tone: "blue" | "purple" | "orange" | "green" };
+type DemoStep = { eyebrow: string; title: string; description: string; kind: "upload" | "scan" | "risk" | "action" };
 type CalendarIntegration = { id: string; provider: string; calendar_id?: string | null; auto_sync: boolean; last_sync_at?: string | null; connected: boolean };
 type NotificationItem = { id: string; title: string; body: string; channel: string; status: string; created_at: string };
 type ReminderOptions = { channel: "in_app" | "email"; days_before: number };
@@ -173,7 +175,7 @@ export default function Home() {
 
   if (session === undefined) return <div className="loading-screen">{t("loadingWorkspace")}</div>;
   if (!session) {
-    if (authView === "landing") return <LandingPage onSignIn={() => setAuthView("auth")} onWatchDemo={() => setAuthView("auth")} features={features} />;
+    if (authView === "landing") return <LandingPage onSignIn={() => setAuthView("auth")} features={features} />;
     return <AuthScreen features={features} onBack={() => setAuthView("landing")} onAuthenticated={next => setSession(next)} />;
   }
 
@@ -221,18 +223,82 @@ function formatRelativeTime(iso: string) {
   return new Date(iso).toLocaleDateString();
 }
 
-function LandingPage({ onSignIn, onWatchDemo, features }: { onSignIn: () => void; onWatchDemo: () => void; features: Features | null }) {
+const LANDING_PIPELINE = ["OCR and parsing", "Classification", "Layout understanding", "Structured extraction", "Clause extraction", "Risk analysis", "Deadline detection", "Recommendations", "Embeddings", "Report generation"];
+
+const LANDING_FEATURES: LandingFeature[] = [
+  { title: "Plain-language summary", short: "Understand the important parts at a glance.", detail: "Turn dense clauses and formal language into a concise explanation of what the document means for you.", example: "You can cancel with 30 days’ notice, but the agreement renews automatically each year.", stage: "Report generation", tone: "blue" },
+  { title: "Risk score 0–100", short: "See how much attention a document deserves.", detail: "A grounded score makes it easier to prioritize reviews across contracts, policies, and reports.", example: "72 / 100 · Review recommended before signing", stage: "Risk analysis", tone: "purple" },
+  { title: "Hidden penalty detection", short: "Spot fees, liability, and unfavorable fine print.", detail: "Surface clauses that could create unexpected costs or obligations before they become a surprise.", example: "Early termination fee: 2 months of service charges", stage: "Clause extraction", tone: "orange" },
+  { title: "Deadline reminders", short: "Never miss a renewal or notice window.", detail: "Extract important dates and turn them into a clear timeline you can act on.", example: "Renewal notice due · 14 Aug 2026", stage: "Deadline detection", tone: "green" },
+  { title: "Grounded AI chat", short: "Ask questions and get evidence-backed answers.", detail: "Chat with an analyzed document and trace answers back to the source text that supports them.", example: "“What happens if I end this agreement early?” · Page 8", stage: "Embeddings", tone: "blue" },
+  { title: "Multi-language translation", short: "Review insights in the language you prefer.", detail: "Translate summaries and extracted insights while keeping the original evidence in view.", example: "Summary translated to Spanish", stage: "Report generation", tone: "purple" },
+  { title: "Voice summary", short: "Listen to the key points while you move.", detail: "Generate an audio overview of the document’s most important risks, dates, and next steps.", example: "2 min 18 sec · Ready to play", stage: "Report generation", tone: "green" },
+  { title: "Contract comparison", short: "Make changes between two versions obvious.", detail: "Compare documents side by side to find added risks, changed clauses, and missing protections.", example: "3 changed clauses · 1 new risk", stage: "Structured extraction", tone: "orange" },
+];
+
+const DEMO_STEPS: DemoStep[] = [
+  { eyebrow: "01 · Upload", title: "Start with the document you need to understand", description: "Drop in a contract, policy, report, or scanned document and DocuGuardian prepares it for review.", kind: "upload" },
+  { eyebrow: "02 · Analyze", title: "Watch the document become structured insight", description: "The pipeline reads the layout, extracts clauses, and connects related evidence across the document.", kind: "scan" },
+  { eyebrow: "03 · Understand risk", title: "See the clauses that need your attention", description: "A clear score and evidence-backed findings show what could cost you and why it matters.", kind: "risk" },
+  { eyebrow: "04 · Take action", title: "Leave with a plan, not a pile of pages", description: "Deadlines and recommendations turn the analysis into practical next steps before you sign.", kind: "action" },
+];
+
+function pipelineDescription(stage: string) {
+  const descriptions: Record<string, string> = {
+    "OCR and parsing": "Reads text from digital files and scanned pages so every important detail can be analyzed.",
+    Classification: "Identifies the document type and the kinds of obligations it contains.",
+    "Layout understanding": "Preserves headings, tables, signatures, and page structure as context.",
+    "Structured extraction": "Organizes parties, amounts, dates, and terms into useful fields.",
+    "Clause extraction": "Separates individual clauses so risks and protections can be reviewed clearly.",
+    "Risk analysis": "Scores potential exposure and explains the evidence behind each finding.",
+    "Deadline detection": "Finds renewal, payment, expiry, and notice dates that may need action.",
+    Recommendations: "Turns findings into specific review, negotiation, and follow-up actions.",
+    Embeddings: "Connects your questions to the most relevant passages for grounded chat.",
+    "Report generation": "Brings the analysis together in a readable report you can share and revisit.",
+  };
+  return descriptions[stage] || "Transforms document content into evidence-backed intelligence you can act on.";
+}
+
+function LandingPage({ onSignIn, features }: { onSignIn: () => void; features: Features | null }) {
+  const [selectedFeature, setSelectedFeature] = useState<LandingFeature | null>(null);
+  const [selectedStage, setSelectedStage] = useState("");
+  const [demoOpen, setDemoOpen] = useState(false);
+  const [demoStep, setDemoStep] = useState(0);
+  const pipelineStages = features?.pipeline_stages?.length ? features.pipeline_stages : LANDING_PIPELINE;
+  const activeStage = selectedStage || pipelineStages[0];
+
+  useEffect(() => {
+    if (!demoOpen) return;
+    function closeOnEscape(event: KeyboardEvent) { if (event.key === "Escape") setDemoOpen(false); }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [demoOpen]);
+
+  function openDemo() { setDemoStep(0); setDemoOpen(true); }
+
   return <div className="landing">
     <div className="landing-hero">
       <div className="landing-brand"><span className="brand-mark">D</span><span>DocuGuardian</span></div>
       <h1>Protect Every Document Before It Costs You</h1>
       <p>Transform contracts, policies, and reports into risk scores, deadlines, and clear next actions—before you sign.</p>
-      <div className="landing-cta"><button className="primary" onClick={onSignIn}>Get started</button><button className="ghost" onClick={onWatchDemo}>Watch demo</button></div>
+      <div className="landing-cta"><button className="primary" onClick={onSignIn}>Get started <span aria-hidden="true">→</span></button><button className="ghost" onClick={openDemo}><span className="play-icon" aria-hidden="true">▶</span> Watch demo</button></div>
+      <div className="landing-trust"><span><span className="trust-dot" aria-hidden="true">✓</span> Evidence-backed</span><span><span className="trust-dot" aria-hidden="true">✓</span> Built for clarity</span><span><span className="trust-dot" aria-hidden="true">✓</span> Ready before you sign</span></div>
     </div>
-    <div className="landing-grid">
-      {["Plain-language summary", "Risk score 0–100", "Hidden penalty detection", "Deadline reminders", "Grounded AI chat", "Multi-language translation", "Voice summary", "Contract comparison"].map(item => <div className="landing-feature" key={item}><strong>{item}</strong><p>Evidence-backed intelligence from your uploaded documents.</p></div>)}
+    <div className="landing-grid" aria-label="Product capabilities">
+      {LANDING_FEATURES.map((feature, index) => <button className={`landing-feature ${selectedFeature?.title === feature.title ? "selected" : ""}`} data-tone={feature.tone} key={feature.title} onClick={() => setSelectedFeature(selectedFeature?.title === feature.title ? null : feature)} aria-expanded={selectedFeature?.title === feature.title} aria-controls="landing-feature-preview">
+        <span className="feature-number">0{index + 1}</span><span className="feature-arrow" aria-hidden="true">↗</span><strong>{feature.title}</strong><span>{feature.short}</span>
+      </button>)}
     </div>
-    {features?.pipeline_stages?.length ? <p className="landing-note">Live pipeline: {features.pipeline_stages.join(" → ")}</p> : null}
+    {selectedFeature && <section className="landing-feature-preview" id="landing-feature-preview" aria-live="polite">
+      <div className={`feature-preview-icon ${selectedFeature.tone}`} aria-hidden="true">✦</div><div className="feature-preview-copy"><div className="preview-kicker">Feature preview <span>·</span> {selectedFeature.stage}</div><h2>{selectedFeature.title}</h2><p>{selectedFeature.detail}</p><div className="preview-example"><span className="example-label">Example output</span><strong>{selectedFeature.example}</strong></div><button className="primary" onClick={onSignIn}>Try it with your document <span aria-hidden="true">→</span></button></div><button className="preview-close" onClick={() => setSelectedFeature(null)} aria-label="Close feature preview">×</button>
+    </section>}
+    <section className="landing-pipeline" aria-labelledby="pipeline-title">
+      <div className="pipeline-heading"><div><span className="eyebrow">How it works</span><h2 id="pipeline-title">From upload to confident action</h2></div><span className="pipeline-live"><span aria-hidden="true" /> Live pipeline</span></div>
+      <div className="pipeline-track">{pipelineStages.map((stage, index) => <button className={`pipeline-stage ${activeStage === stage ? "active" : ""}`} key={stage} onClick={() => setSelectedStage(stage)} aria-pressed={activeStage === stage}><span className="pipeline-index">{String(index + 1).padStart(2, "0")}</span><span>{stage}</span>{index < pipelineStages.length - 1 && <span className="pipeline-connector" aria-hidden="true">→</span>}</button>)}</div>
+      <div className="pipeline-detail"><div className="pipeline-detail-icon" aria-hidden="true">{String(Math.max(1, pipelineStages.indexOf(activeStage) + 1)).padStart(2, "0")}</div><div><span className="preview-kicker">Selected stage</span><h3>{activeStage}</h3><p>{pipelineDescription(activeStage)}</p></div><button className="pipeline-demo-link" onClick={openDemo}>See it in the demo <span aria-hidden="true">→</span></button></div>
+    </section>
+    <p className="landing-note">Your documents stay at the center—from OCR and parsing to recommendations and a report you can trust.</p>
+    {demoOpen && <div className="demo-modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setDemoOpen(false); }}><div className="demo-modal" role="dialog" aria-modal="true" aria-labelledby="demo-title"><div className="demo-modal-head"><div><span className="eyebrow">Interactive product tour</span><h2 id="demo-title">See how DocuGuardian protects a document</h2></div><button className="preview-close" onClick={() => setDemoOpen(false)} aria-label="Close demo">×</button></div><div className="demo-progress"><div><span>Step {demoStep + 1} of {DEMO_STEPS.length}</span><strong>{Math.round(((demoStep + 1) / DEMO_STEPS.length) * 100)}%</strong></div><div className="demo-progress-track"><span style={{ width: `${((demoStep + 1) / DEMO_STEPS.length) * 100}%` }} /></div></div><div className="demo-content"><div className={`demo-visual demo-${DEMO_STEPS[demoStep].kind}`} aria-hidden="true">{DEMO_STEPS[demoStep].kind === "upload" && <><div className="demo-file-icon">PDF</div><strong>Supplier agreement.pdf</strong><span>12 pages · 2.4 MB</span><div className="demo-upload-line"><span>Drop to analyze</span><span>↥</span></div></>}{DEMO_STEPS[demoStep].kind === "scan" && <><div className="demo-scan-file"><span /><span /><span /><span /><span /></div><div className="demo-scan-beam" /><div className="demo-scan-status"><span className="demo-spinner" /> Analyzing page 8 of 12</div></>}{DEMO_STEPS[demoStep].kind === "risk" && <><div className="demo-score"><strong>72</strong><span>/100 risk score</span></div><div className="demo-risk-row"><span className="risk-dot high" /><div><strong>Early termination fee</strong><span>High attention · Page 8</span></div></div><div className="demo-risk-row"><span className="risk-dot medium" /><div><strong>Auto-renewal clause</strong><span>Review recommended</span></div></div></>}{DEMO_STEPS[demoStep].kind === "action" && <><div className="demo-action-card"><span>Next deadline</span><strong>14 Aug 2026</strong><small>Renewal notice due</small></div><div className="demo-check-row"><span>✓</span><strong>Review termination clause</strong></div><div className="demo-check-row"><span>○</span><strong>Set a calendar reminder</strong></div></>}</div><div className="demo-copy"><span className="eyebrow">{DEMO_STEPS[demoStep].eyebrow}</span><h3>{DEMO_STEPS[demoStep].title}</h3><p>{DEMO_STEPS[demoStep].description}</p>{demoStep === DEMO_STEPS.length - 1 && <button className="primary" onClick={onSignIn}>Get started <span aria-hidden="true">→</span></button>}</div></div><div className="demo-dots">{DEMO_STEPS.map((step, index) => <button key={step.eyebrow} className={index === demoStep ? "active" : ""} onClick={() => setDemoStep(index)} aria-label={`Go to demo step ${index + 1}`} />)}</div><div className="demo-actions"><button className="ghost" onClick={() => setDemoStep(step => Math.max(0, step - 1))} disabled={demoStep === 0}>← Back</button>{demoStep < DEMO_STEPS.length - 1 ? <button className="primary" onClick={() => setDemoStep(step => Math.min(DEMO_STEPS.length - 1, step + 1))}>Next <span aria-hidden="true">→</span></button> : <button className="ghost" onClick={() => setDemoStep(0)}>Replay demo</button>}</div></div></div>}
   </div>;
 }
 
@@ -709,7 +775,7 @@ function AnalyticsScreen({ analytics, t }: { analytics: Analytics | null; t: (ke
   const total = Math.max(analytics.documents_uploaded, 1);
   const monthlyMax = Math.max(1, ...(analytics.monthly_uploads || []).map(item => item.count));
   return <div className="workspace-grid">
-    <div className="card workspace-card"><h2>{t("stat.highRisk")}</h2><div className="chart-row"><div className="bar" style={{ height: `${Math.max(6, analytics.high_risk_documents / total * 100)}%` }}><span>{analytics.high_risk_documents}</span></div><div className="bar" style={{ height: `${Math.max(6, analytics.medium_risk_documents / total * 100)}%`, background: "linear-gradient(#f8c75e,#f59e0b)" }}><span>{analytics.medium_risk_documents}</span></div><div className="bar" style={{ height: `${Math.max(6, analytics.low_risk_documents / total * 100)}%`, background: "linear-gradient(#53d3a5,#10b981)" }}><span>{analytics.low_risk_documents}</span></div></div><div className="chart-labels"><span>{t("stat.highRisk")}</span><span>{t("stat.deadlines")}</span><span>{t("stat.protection")}</span></div></div>
+    <div className="card workspace-card"><h2>{t("stat.highRisk")}</h2><div className="chart-row"><div className="bar" style={{ height: `${Math.max(6, analytics.high_risk_documents / total * 100)}%` }}><span>{analytics.high_risk_documents}</span></div><div className="bar" style={{ height: `${Math.max(6, analytics.medium_risk_documents / total * 100)}%`, background: "linear-gradient(#f8c75e,#f59e0b)" }}><span>{analytics.medium_risk_documents}</span></div><div className="bar" style={{ height: `${Math.max(6, analytics.low_risk_documents / total * 100)}%`, background: "linear-gradient(#53d3a5,#10b981)" }}><span>{analytics.low_risk_documents}</span></div></div><div className="chart-labels"><span>{t("stat.highRisk")}</span><span>{t("stat.mediumRisk")}</span><span>{t("stat.lowRisk")}</span></div></div>
     <div className="card workspace-card"><h2>{t("page.analytics.title")}</h2><div className="stats analytics-stats"><Stat icon="▤" label={t("stat.documents")} value={String(analytics.documents_uploaded)} foot="total" /><Stat icon="!" label={t("stat.highRisk")} value={String(analytics.average_risk_score)} foot="out of 100" tone="orange" /><Stat icon="✓" label={t("stat.protection")} value={`${analytics.protection_score}%`} foot="score" tone="green" /></div></div>
     <div className="card workspace-card"><h2>Categories</h2>{analytics.categories?.length ? analytics.categories.map(item => <div className="timeline-item" key={item.category}><span className="timeline-dot" /><div><strong>{item.category}</strong><small>{item.count} documents</small></div></div>) : <p className="muted">No classifications yet.</p>}</div>
     <div className="card workspace-card"><h2>Monthly uploads</h2><div className="chart-row">{(analytics.monthly_uploads || []).map(item => <div className="bar" key={item.month} style={{ height: `${Math.max(6, item.count / monthlyMax * 100)}%` }} title={item.month}><span>{item.count}</span></div>)}</div><div className="chart-labels">{(analytics.monthly_uploads || []).map(item => <span key={item.month}>{item.month}</span>)}</div></div>

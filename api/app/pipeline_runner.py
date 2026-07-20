@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import ai
-from .config import AI_MODE, ENABLE_FIXTURE_ANALYSIS, PIPELINE_STAGES
+from .config import AI_MODE, ENABLE_FIXTURE_ANALYSIS, FEATURE_FRAUD, PIPELINE_STAGES
 from .db import DB_LOCK, connect
 from .parsing import chunk_text, extract_text, is_low_quality_extraction, split_sections
 from .storage import materialize_object
@@ -100,10 +100,15 @@ def run_pipeline(
                     item["severity"], item["explanation"], item.get("page"), item.get("text_span"),
                     item.get("confidence"),
                 )
-                for item in intelligence.get("fraud_indicators", [])
+                for item in (intelligence.get("fraud_indicators", []) if FEATURE_FRAUD else [])
             ], columns="id,document_id,title,indicator_type,severity,explanation,page,text_span,confidence")
         elif stage == "Deadline detection":
             assert intelligence is not None
+            try:
+                from . import calendar_sync as calendar_sync_module
+                calendar_sync_module.delete_document_events(document_id, organization_id)
+            except Exception:
+                pass
             with DB_LOCK, connect() as db:
                 db.execute("DELETE FROM deadlines WHERE document_id=?", (document_id,))
                 for deadline in intelligence.get("deadlines", []):
@@ -118,11 +123,6 @@ def run_pipeline(
                             deadline.get("timezone", "UTC"),
                         ),
                     )
-            try:
-                from . import calendar_sync as calendar_sync_module
-                calendar_sync_module.sync_document_deadlines(document_id, organization_id)
-            except Exception:
-                pass
         elif stage == "Recommendations":
             assert intelligence is not None
             _replace_children(document_id, "action_items", [
@@ -166,7 +166,7 @@ def _load_intelligence(path: Path, filename: str, extracted: str, *, force_visio
     if AI_MODE == "demo":
         if not ENABLE_FIXTURE_ANALYSIS:
             raise RuntimeError("AI_MODE=demo is disabled. Set ENABLE_FIXTURE_ANALYSIS=true for fixture runs only.")
-        return {
+        intelligence = {
             "summary": f"{filename} was analyzed using explicit fixture analysis.",
             "classification": "Document",
             "risk_score": 42,
@@ -183,7 +183,11 @@ def _load_intelligence(path: Path, filename: str, extracted: str, *, force_visio
             "evidence": [],
             "model_version": "fixture",
         }
-    return ai.analyze_file(path, filename, extracted, force_vision=force_vision)
+    else:
+        intelligence = ai.analyze_file(path, filename, extracted, force_vision=force_vision)
+    if not FEATURE_FRAUD:
+        intelligence["fraud_indicators"] = []
+    return intelligence
 
 
 def _replace_children(document_id: str, table: str, rows: list[tuple], columns: str) -> None:
@@ -221,7 +225,7 @@ def _assemble_report(document_id: str, intelligence: dict[str, Any]) -> dict[str
         fraud_indicators = fetchall(db.execute(
             "SELECT title,indicator_type,severity,explanation,page,text_span,confidence FROM document_fraud_indicators WHERE document_id=?",
             (document_id,),
-        ))
+        )) if FEATURE_FRAUD else []
 
     report_risks = [
         {
@@ -252,7 +256,7 @@ def _assemble_report(document_id: str, intelligence: dict[str, Any]) -> dict[str
         "entities": entities or intelligence.get("entities", []),
         "clauses": clauses or intelligence.get("clauses", []),
         "obligations": obligations or intelligence.get("obligations", []),
-        "fraud_indicators": fraud_indicators or intelligence.get("fraud_indicators", []),
+        "fraud_indicators": (fraud_indicators or intelligence.get("fraud_indicators", [])) if FEATURE_FRAUD else [],
         "risks": report_risks,
         "hidden_penalties": [risk for risk in report_risks if risk.get("is_penalty")],
         "deadlines": intelligence.get("deadlines", []),
