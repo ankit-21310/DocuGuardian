@@ -54,3 +54,47 @@ def test_features_endpoint() -> None:
 def test_notifications_require_auth() -> None:
     response = client.get("/api/v1/notifications")
     assert response.status_code == 401
+
+
+def test_upload_completes_and_allows_chat(monkeypatch) -> None:
+    import app.pipeline_runner as pipeline_runner
+    from app import ai
+
+    monkeypatch.setattr(pipeline_runner, "AI_MODE", "demo")
+    monkeypatch.setattr(pipeline_runner, "ENABLE_FIXTURE_ANALYSIS", True)
+    monkeypatch.setattr(ai, "embed_texts", lambda texts: [[] for _ in texts])
+    monkeypatch.setattr(
+        ai,
+        "answer_question",
+        lambda *args, **kwargs: {"answer": "Fixture answer.", "citations": []},
+    )
+
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    auth = headers()
+    response = client.post(
+        "/api/v1/documents",
+        headers=auth,
+        files={"file": ("fixture.png", png, "image/png")},
+    )
+    assert response.status_code == 202
+    document_id = response.json()["id"]
+
+    status = "queued"
+    for _ in range(100):
+        processing = client.get(f"/api/v1/documents/{document_id}/processing", headers=auth)
+        assert processing.status_code == 200
+        status = processing.json()["status"]
+        if status in {"completed", "failed"}:
+            break
+
+    document = client.get(f"/api/v1/documents/{document_id}", headers=auth)
+    assert document.status_code == 200
+    assert document.json()["status"] == "completed", f"expected completed, got {status}"
+
+    chat = client.post(
+        f"/api/v1/documents/{document_id}/chat",
+        headers=auth,
+        json={"message": "What is this document about?"},
+    )
+    assert chat.status_code == 200
+    assert chat.json()["answer"]

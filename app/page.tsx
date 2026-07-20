@@ -46,6 +46,7 @@ export default function Home() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [processing, setProcessing] = useState<{ name: string; progress: number; stage: string; stages: Stage[] } | null>(null);
+  const [processingVisible, setProcessingVisible] = useState(false);
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState("");
 
@@ -91,7 +92,7 @@ export default function Home() {
     const allowed = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "image/png", "image/jpeg"];
     if (!allowed.includes(file.type) && !/\.(pdf|docx|png|jpe?g)$/i.test(file.name)) { setUploadError("Use a PDF, DOCX, PNG, or JPG file."); return; }
     if (file.size > 25 * 1024 * 1024) { setUploadError("Files must be 25 MB or smaller."); return; }
-    setUploadOpen(false); setProcessing({ name: file.name, progress: 0, stage: "Uploading", stages: [] });
+    setUploadOpen(false); setProcessing({ name: file.name, progress: 0, stage: "Uploading", stages: [] }); setProcessingVisible(true);
     const body = new FormData(); body.append("file", file);
     try {
       const response = await apiFetch("/api/v1/documents", session.token, { method: "POST", body });
@@ -110,7 +111,7 @@ export default function Home() {
       await loadWorkspace(session);
       setToast("Document analysis complete.");
     } catch (error) { setUploadError(error instanceof Error ? error.message : "Upload failed"); }
-    finally { setProcessing(null); }
+    finally { setProcessing(null); setProcessingVisible(false); }
   }
 
   function onFileChange(event: ChangeEvent<HTMLInputElement>) { handleUpload(event.target.files?.[0]); event.target.value = ""; }
@@ -130,7 +131,7 @@ export default function Home() {
     <aside className="sidebar"><div className="brand"><span className="brand-mark">D</span><span>DocuGuardian</span></div><div className="nav-label">Workspace</div><nav className="nav">{nav.map(([icon, label]) => <button key={label} className={active === label ? "active" : ""} onClick={() => setActive(label)}><span className="nav-icon">{icon}</span><span>{label}</span></button>)}</nav><div className="sidebar-bottom"><div className="user"><span className="avatar">{initials(session.user.name)}</span><div><b>{session.user.name}</b><small>{session.user.role} · {session.user.email}</small></div></div><button className="signout" onClick={signOut}>Sign out</button></div></aside>
     <main className="main"><header className="topbar"><div className="crumb">Workspace / <strong>{active}</strong></div><div className="top-actions">{notifications.length > 0 && <span className="bell" title={`${notifications.length} notifications`}>🔔</span>}<span className="avatar">{initials(session.user.name)}</span></div></header><section className="content">{currentPage}</section></main>
     {uploadOpen && <div className="upload-modal" role="dialog" aria-modal="true"><div className="modal"><div className="modal-head"><h2>Upload a document</h2><button className="close" onClick={() => setUploadOpen(false)} aria-label="Close">×</button></div><div className="drop" onDragOver={event => event.preventDefault()} onDrop={onDrop}><div className="drop-icon">↑</div><strong>Drop your document here</strong><p>We’ll analyze risks, deadlines, clauses, and recommendations.</p><label className="browse">Browse files<input type="file" accept=".pdf,.docx,.png,.jpg,.jpeg" onChange={onFileChange} /></label></div><div className="format">Supported: PDF, DOCX, JPG, PNG · Max file size 25 MB</div>{uploadError && <p className="form-error">{uploadError}</p>}</div></div>}
-    {processing && <ProcessingModal processing={processing} />}
+    {processing && processingVisible && <ProcessingModal processing={processing} onClose={() => setProcessingVisible(false)} />}
     {toast && <div className="toast">{toast}</div>}
   </div>;
 }
@@ -381,7 +382,9 @@ function DocumentRow({ doc, compact = false }: { doc: DocumentItem; compact?: bo
   return <><div className={`file-icon ${type === "PDF" ? "pdf" : ""}`}>{type}</div><div><div className="doc-title">{doc.name}</div><div className="doc-meta">{doc.classification || type} · {formatDate(doc.created_at)}</div></div><div className={`risk ${doc.risk_level || "low"}`}><span className="risk-dot" />{doc.status === "completed" ? `${doc.risk_level || "unknown"} · ${doc.risk_score ?? "—"}` : doc.status === "failed" ? "Failed" : `${doc.stage || "Queued"} · ${doc.progress}%`}</div>{!compact && <div className="status">{doc.status}</div>}</>;
 }
 function DeadlineRow({ deadline }: { deadline: Deadline }) { return <div className="deadline-item"><div className="date-box"><strong>{new Date(deadline.due_date).getUTCDate()}</strong>{new Date(deadline.due_date).toLocaleString("en", { month: "short", timeZone: "UTC" }).toUpperCase()}</div><div><div className="deadline-title">{deadline.title}</div><div className="deadline-meta">{formatDate(deadline.due_date)} · {deadline.priority} priority</div></div></div>; }
-function ProcessingModal({ processing }: { processing: { name: string; progress: number; stage: string; stages: Stage[] } }) { return <div className="upload-modal"><div className="modal processing-modal"><div className="drop-icon">✦</div><h2>Analyzing {processing.name}</h2><p>Processing is running in the document pipeline.</p><div className="score-track"><div className="score-fill" style={{ width: `${processing.progress}%` }} /></div><strong>{processing.progress}% · {processing.stage}</strong><div className="stage-list">{processing.stages.map(stage => <div key={stage.stage} className={stage.status}><span>{stage.status === "completed" ? "✓" : stage.status === "running" ? "•" : "○"}</span>{stage.stage}</div>)}</div></div></div>; }
+function ProcessingModal({ processing, onClose }: { processing: { name: string; progress: number; stage: string; stages: Stage[] }; onClose: () => void }) {
+  return <div className="upload-modal" role="dialog" aria-modal="true"><div className="modal processing-modal"><div className="modal-head"><h2>Analyzing {processing.name}</h2><button className="close" onClick={onClose} aria-label="Close">×</button></div><div className="processing-body"><div className="drop-icon">✦</div><p>Processing is running in the document pipeline.</p><div className="score-track"><div className="score-fill" style={{ width: `${processing.progress}%` }} /></div><strong>{processing.progress}% · {processing.stage}</strong><div className="stage-list">{processing.stages.map(stage => <div key={stage.stage} className={stage.status}><span>{stage.status === "completed" ? "✓" : stage.status === "running" ? "•" : "○"}</span>{stage.stage}</div>)}</div></div></div></div>;
+}
 function Stat({ icon, label, value, foot, tone }: { icon: string; label: string; value: string; foot: React.ReactNode; tone?: string }) { return <div className="card stat"><div className="stat-top"><span>{label}</span><span className="stat-icon" data-tone={tone}>{icon}</span></div><div className="stat-value">{value}</div><div className="stat-foot">{foot}</div></div>; }
 function EmptyState({ title, text, action, actionLabel }: { title: string; text: string; action?: () => void; actionLabel?: string }) { return <div className="empty-state"><strong>{title}</strong><p>{text}</p>{action && <button className="view" onClick={action}>{actionLabel || "Try again"}</button>}</div>; }
 function formatDate(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString(); }

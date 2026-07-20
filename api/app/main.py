@@ -94,6 +94,10 @@ def init_db() -> None:
     with connect() as db:
         db.executescript(SCHEMA_SQL)
         _migrate_columns(db)
+        db.execute(
+            "UPDATE documents SET status='completed', updated_at=? WHERE status='processing' AND stage='Complete' AND report_json IS NOT NULL",
+            (now(),),
+        )
         if ENABLE_DEMO_AUTH:
             if is_postgres():
                 db.execute(
@@ -655,13 +659,13 @@ def process_document(document_id: str, organization_id: str, user: dict[str, Any
         return
 
     def on_stage(stage: str, progress: int) -> None:
+        if stage == "Complete":
+            return
         with DB_LOCK, connect() as db:
             db.execute(
                 "UPDATE documents SET status='processing',stage=?,progress=?,updated_at=? WHERE id=?",
                 (stage, progress, now(), document_id),
             )
-            if stage == "Complete":
-                return
             running = fetchone(db.execute(
                 "SELECT stage FROM processing_stages WHERE document_id=? AND status='running'", (document_id,)
             ))
