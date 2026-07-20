@@ -43,13 +43,15 @@ ROLES = {"Owner", "Admin", "Member", "Viewer"}
 BEARER = HTTPBearer(auto_error=False)
 
 app = FastAPI(title="DocuGuardian API", version="0.3.0", openapi_url="/api/v1/openapi.json")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+_cors_options: dict[str, Any] = {
+    "allow_origins": CORS_ORIGINS,
+    "allow_credentials": True,
+    "allow_methods": ["*"],
+    "allow_headers": ["*"],
+}
+if ENVIRONMENT == "development":
+    _cors_options["allow_origin_regex"] = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
+app.add_middleware(CORSMiddleware, **_cors_options)
 
 
 def now() -> str:
@@ -397,12 +399,25 @@ def download_report(document_id: str, user: dict[str, Any] = Depends(current_use
     )
 
 
+def _parse_embedding(raw: str | None) -> list[float]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 @app.post("/api/v1/documents/{document_id}/chat")
 def chat(document_id: str, request: ChatRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     document = fetch_document(document_id, user["organization_id"])
     if document["status"] != "completed":
         raise HTTPException(status_code=409, detail="Chat is available after analysis completes")
-    report = json.loads(document["report_json"]) if document["report_json"] else {}
+    try:
+        report = json.loads(document["report_json"]) if document["report_json"] else {}
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=503, detail="Document report is unavailable")
     with connect() as db:
         chunk_rows = fetchall(db.execute(
             "SELECT content,page,ordinal,embedding_json FROM document_chunks WHERE document_id=? ORDER BY ordinal",
@@ -413,7 +428,7 @@ def chat(document_id: str, request: ChatRequest, user: dict[str, Any] = Depends(
             "content": row["content"],
             "page": row["page"],
             "ordinal": row["ordinal"],
-            "embedding": json.loads(row["embedding_json"]) if row.get("embedding_json") else [],
+            "embedding": _parse_embedding(row.get("embedding_json")),
         }
         for row in chunk_rows
     ]
@@ -422,6 +437,8 @@ def chat(document_id: str, request: ChatRequest, user: dict[str, Any] = Depends(
         response = answer_question(document["name"], report, request.message, retrieved)
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error))
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"Chat failed: {error}")
     with DB_LOCK, connect() as db:
         db.execute(
             "INSERT INTO chat_messages VALUES (?, ?, ?, ?, ?, ?, ?)",

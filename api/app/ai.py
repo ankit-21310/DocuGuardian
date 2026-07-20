@@ -244,6 +244,36 @@ def retrieve_chunks(question: str, chunks: list[dict[str, Any]], limit: int = 5)
         return [chunk for score, chunk in scored[:limit] if score > 0]
 
 
+CHAT_RESPONSE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "answer": {"type": "string"},
+        "suggested_prompts": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 2,
+            "maxItems": 4,
+        },
+    },
+    "required": ["answer", "suggested_prompts"],
+}
+
+
+def _default_suggested_prompts(report: dict[str, Any], question: str) -> list[str]:
+    prompts: list[str] = []
+    if report.get("risks"):
+        prompts.append("Which risks need attention first?")
+    if report.get("deadlines"):
+        prompts.append("What deadlines should I calendar?")
+    if report.get("clauses"):
+        prompts.append("Explain the most important clauses in plain language.")
+    if len(prompts) < 2:
+        prompts.extend(["What should I do next?", "Summarize this document in simple terms."])
+    filtered = [item for item in prompts if item.lower() not in question.lower()]
+    return (filtered or prompts)[:3]
+
+
 def _lexical_score(question: str, content: str) -> float:
     terms = {term for term in re.findall(r"[a-z0-9]{3,}", question.lower())}
     if not terms:
@@ -282,7 +312,11 @@ def answer_question(
                 "content": (
                     "You are DocuGuardian. Answer only from the provided report and retrieved document chunks. "
                     "If the answer is not present, say so clearly. Cite concrete source labels. "
-                    "Never present legal, medical, or financial advice as certainty."
+                    "Never present legal, medical, or financial advice as certainty. "
+                    "Format `answer` in Markdown with short paragraphs, bullet lists for multiple items, "
+                    "and **bold** for key terms, dates, and risks. "
+                    "Return 2-3 concise follow-up questions in `suggested_prompts` that help the user dig deeper "
+                    "into this specific document. Do not repeat the user's question."
                 ),
             },
             {
@@ -293,9 +327,23 @@ def answer_question(
                 ),
             },
         ],
+        text={"format": {"type": "json_schema", "name": "chat_response", "strict": True, "schema": CHAT_RESPONSE_SCHEMA}},
     )
+    try:
+        payload = json.loads(response.output_text)
+        answer_text = str(payload.get("answer", "")).strip()
+        suggested_prompts = [
+            str(item).strip()
+            for item in payload.get("suggested_prompts", [])
+            if str(item).strip()
+        ][:4]
+    except json.JSONDecodeError:
+        answer_text = response.output_text.strip()
+        suggested_prompts = _default_suggested_prompts(report, question)
+    if not suggested_prompts:
+        suggested_prompts = _default_suggested_prompts(report, question)
     citations: list[dict[str, Any]] = []
-    answer_lower = response.output_text.lower()
+    answer_lower = answer_text.lower()
     for chunk in retrieved_chunks or []:
         snippet = (chunk.get("content") or "")[:160]
         if snippet and any(token in answer_lower for token in snippet.lower().split()[:6]):
@@ -332,7 +380,7 @@ def answer_question(
             continue
         seen.add(key)
         unique.append(citation)
-    return {"answer": response.output_text, "citations": unique[:5]}
+    return {"answer": answer_text, "citations": unique[:5], "suggested_prompts": suggested_prompts}
 
 
 def translate_text(text: str, target_language: str) -> str:

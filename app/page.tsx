@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 
 type User = { id: string; email: string; name: string; role: string; organization_id: string };
 type DocumentItem = { id: string; name: string; content_type: string; size: number; status: string; stage?: string; progress: number; risk_level?: "high" | "medium" | "low"; risk_score?: number; classification?: string; created_at: string; updated_at: string; report?: Report | null };
@@ -11,6 +11,12 @@ type Risk = { title: string; severity: string; explanation: string; recommendati
 type Clause = { title: string; body: string; severity: string; category: string; page?: number | null; text_span?: string | null; confidence?: number };
 type ActionItem = { title: string; detail: string; priority: string; due_date?: string | null; status?: string };
 type Report = { summary: string; classification: string; risk_score: number; risk_level: string; confidence: number; risks: Risk[]; clauses?: Clause[]; hidden_penalties?: Risk[]; deadlines: Array<{ title: string; date: string; priority: string; source: string; page?: number | null }>; recommendations: string[]; action_plan?: ActionItem[]; evidence?: Array<{ page?: number | null; text_span: string; label: string; confidence: number }>; model_version?: string };
+type ChatMessage = {
+  role: "ai" | "user";
+  text: string;
+  citations?: Array<{ label: string; page?: number; confidence?: number }>;
+  suggestedPrompts?: string[];
+};
 type Session = { token: string; user: User };
 type Features = { voice: boolean; translation: boolean; demo_auth: boolean; pipeline_stages: string[] };
 type NotificationItem = { id: string; title: string; body: string; channel: string; status: string; created_at: string };
@@ -181,7 +187,9 @@ function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, fe
   const [reportDoc, setReportDoc] = useState<DocumentItem | null>(null);
   const [question, setQuestion] = useState("");
   const [selectedChatDoc, setSelectedChatDoc] = useState("");
-  const [messages, setMessages] = useState<Array<{ role: "ai" | "user"; text: string; citations?: Array<{ label: string; page?: number; confidence?: number }> }>>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatLoading, setChatLoading] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
   const [compareIds, setCompareIds] = useState(["", ""]);
   const [comparison, setComparison] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState("");
@@ -200,7 +208,12 @@ function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, fe
 
   useEffect(() => {
     setMessages([{ role: "ai", text: selectedChatDoc ? "Ask a question about this analyzed document and I’ll cite retrieved evidence." : "Select an analyzed document to start a grounded conversation." }]);
+    setChatLoading(false);
   }, [selectedChatDoc]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages, chatLoading]);
 
   useEffect(() => {
     if (active !== "Settings") return;
@@ -215,12 +228,30 @@ function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, fe
   }
 
   async function ask(text = question) {
-    if (!text.trim() || !selectedChatDoc) return;
-    setQuestion(""); setMessages(items => [...items, { role: "user", text }]);
-    const response = await apiFetch(`/api/v1/documents/${selectedChatDoc}/chat`, token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text }) });
-    if (!response.ok) { setError("Chat is unavailable for this document."); return; }
-    const answer = await response.json();
-    setMessages(items => [...items, { role: "ai", text: answer.answer, citations: answer.citations }]);
+    if (!text.trim() || !selectedChatDoc || chatLoading) return;
+    setQuestion(""); setError("");
+    setMessages(items => [...items, { role: "user", text }]);
+    setChatLoading(true);
+    try {
+      const response = await apiFetch(`/api/v1/documents/${selectedChatDoc}/chat`, token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text }) });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        const detail = payload?.detail;
+        setError(typeof detail === "string" ? detail : "Chat is unavailable for this document.");
+        return;
+      }
+      const answer = await response.json();
+      setMessages(items => [...items, {
+        role: "ai",
+        text: answer.answer,
+        citations: answer.citations,
+        suggestedPrompts: answer.suggested_prompts,
+      }]);
+    } catch {
+      setError("Unable to reach the API. Restart the backend and try again.");
+    } finally {
+      setChatLoading(false);
+    }
   }
 
   async function compare() {
@@ -259,7 +290,7 @@ function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, fe
     <div className="workspace-head"><div><h1>{title}</h1><p>{subtitle}</p></div>{active === "Documents" && <button className="primary" onClick={onUpload}>＋ Upload document</button>}</div>
     {error && <p className="form-error">{error}</p>}
     {active === "Documents" && <div className="workspace-grid"><div className="card workspace-card"><h2>All documents <span className="muted-count">({docs.length})</span></h2>{docs.length ? docs.map(doc => <div className="doc-row" key={doc.id}><DocumentRow doc={doc} compact /><div className="doc-actions"><button className="view" onClick={() => openReport(doc)} disabled={doc.status !== "completed"}>Report →</button>{(doc.status === "failed" || doc.status === "completed") && <button className="view" onClick={() => retryDoc(doc.id)}>Retry</button>}<button className="view danger" onClick={() => removeDoc(doc.id)}>Delete</button></div></div>) : <EmptyState title="No documents yet" text="Upload a document to begin." action={onUpload} actionLabel="Upload document" />}</div><ReportPanel report={report} reportDoc={reportDoc} token={token} features={features} onToast={onToast} /></div>}
-    {active === "AI Chat" && <div className="chat-shell"><div className="card chat-box"><div className="chat-toolbar"><label>Document<select value={selectedChatDoc} onChange={event => setSelectedChatDoc(event.target.value)}><option value="">Select an analyzed document</option>{analyzedDocs.map(doc => <option key={doc.id} value={doc.id}>{doc.name}</option>)}</select></label></div><div className="messages">{messages.map((message, index) => <div className={`message ${message.role}`} key={index}><div>{message.text}</div>{message.citations?.map((citation, citationIndex) => <span className="citation" key={citationIndex}>▣ {citation.label}{citation.page ? ` · p.${citation.page}` : ""}</span>)}</div>)}</div><div className="chat-input"><input value={question} onChange={event => setQuestion(event.target.value)} onKeyDown={event => event.key === "Enter" && ask()} placeholder="Ask about your documents…" /><button className="primary" onClick={() => ask()}>Send</button></div></div><div className="card workspace-card"><h2>Suggested prompts</h2>{prompts.map(prompt => <button className="prompt" key={prompt} onClick={() => ask(prompt)}>{prompt} <span>→</span></button>)}<p className="disclaimer">Decision support only. Confirm important decisions with a qualified professional.</p></div></div>}
+    {active === "AI Chat" && <div className="chat-shell"><div className="card chat-box"><div className="chat-toolbar"><label>Document<select value={selectedChatDoc} onChange={event => setSelectedChatDoc(event.target.value)} disabled={chatLoading}><option value="">Select an analyzed document</option>{analyzedDocs.map(doc => <option key={doc.id} value={doc.id}>{doc.name}</option>)}</select></label></div><div className="messages">{messages.map((message, index) => <ChatMessageBubble key={index} message={message} onSuggestedPrompt={ask} disabled={chatLoading || !selectedChatDoc} />)} {chatLoading && <ChatTypingIndicator />}<div ref={messagesEndRef} /></div><div className="chat-input"><input value={question} onChange={event => setQuestion(event.target.value)} onKeyDown={event => event.key === "Enter" && !chatLoading && ask()} placeholder={chatLoading ? "Waiting for response…" : "Ask about your documents…"} disabled={chatLoading || !selectedChatDoc} /><button className={`primary ${chatLoading ? "loading" : ""}`} onClick={() => ask()} disabled={chatLoading || !selectedChatDoc || !question.trim()}>{chatLoading ? "Thinking…" : "Send"}</button></div></div><div className="card workspace-card"><h2>Suggested prompts</h2>{prompts.map(prompt => <button className="prompt" key={prompt} onClick={() => ask(prompt)} disabled={chatLoading || !selectedChatDoc}>{prompt} <span>→</span></button>)}<p className="disclaimer">Decision support only. Confirm important decisions with a qualified professional.</p></div></div>}
     {active === "Calendar" && <CalendarScreen deadlines={deadlines} onRemind={remind} onRefresh={onRefresh} notifications={notifications} />}
     {active === "Compare" && <ComparisonScreen docs={analyzedDocs} compareIds={compareIds} setCompareIds={setCompareIds} compare={compare} comparison={comparison} />}
     {active === "Analytics" && <AnalyticsScreen analytics={analytics} />}
@@ -374,6 +405,56 @@ function SettingsScreen({ user, features, audit, notifications }: { user: User; 
   return <div className="workspace-grid">
     <div className="card workspace-card"><h2>Account</h2><p className="report-summary"><strong>{user.name}</strong><br />{user.email}<br />Role: {user.role}<br />Organization: {user.organization_id}</p><h3>Feature flags</h3><p className="muted">Voice: {features?.voice ? "on" : "off"} · Translation: {features?.translation ? "on" : "off"} · Demo auth: {features?.demo_auth ? "on" : "off"}</p></div>
     <div className="card workspace-card"><h2>Notifications</h2>{notifications.length ? notifications.slice(0, 8).map(item => <div className="finding" key={item.id}><strong>{item.title}</strong><p>{item.body}</p></div>) : <p className="muted">No notifications yet.</p>}<h2>Audit log</h2>{audit.length ? audit.slice(0, 12).map(item => <div className="timeline-item" key={item.id}><span className="timeline-dot" /><div><strong>{item.action}</strong><small>{formatDate(item.created_at)}{item.document_id ? ` · ${item.document_id.slice(0, 8)}` : ""}</small></div></div>) : <p className="muted">Audit events appear for owners and admins.</p>}</div>
+  </div>;
+}
+
+function ChatMessageBubble({ message, onSuggestedPrompt, disabled }: { message: ChatMessage; onSuggestedPrompt: (text: string) => void; disabled: boolean }) {
+  return <div className={`message ${message.role} message-enter`}>
+    <div className={message.role === "ai" ? "chat-markdown" : "chat-plain"}>
+      {message.role === "ai" ? <ChatMarkdown text={message.text} /> : message.text}
+    </div>
+    {message.citations?.map((citation, citationIndex) => <span className="citation" key={citationIndex}>▣ {citation.label}{citation.page ? ` · p.${citation.page}` : ""}</span>)}
+    {!!message.suggestedPrompts?.length && <div className="follow-up-prompts"><span className="follow-up-label">Suggested follow-ups</span><div className="follow-up-list">{message.suggestedPrompts.map(prompt => <button className="follow-up-chip" key={prompt} type="button" onClick={() => onSuggestedPrompt(prompt)} disabled={disabled}>{prompt}</button>)}</div></div>}
+  </div>;
+}
+
+function ChatMarkdown({ text }: { text: string }) {
+  const blocks = text.split(/\n{2,}/).map(block => block.trim()).filter(Boolean);
+  if (!blocks.length) return null;
+  return <>{blocks.map((block, index) => renderMarkdownBlock(block, index))}</>;
+}
+
+function renderMarkdownBlock(block: string, index: number) {
+  const lines = block.split("\n").map(line => line.trim()).filter(Boolean);
+  if (!lines.length) return null;
+  if (lines.every(line => /^[-*]\s+/.test(line))) {
+    return <ul className="chat-list" key={index}>{lines.map(line => <li key={line}>{formatInlineMarkdown(line.replace(/^[-*]\s+/, ""))}</li>)}</ul>;
+  }
+  if (lines.every(line => /^\d+\.\s+/.test(line))) {
+    return <ol className="chat-list" key={index}>{lines.map(line => <li key={line}>{formatInlineMarkdown(line.replace(/^\d+\.\s+/, ""))}</li>)}</ol>;
+  }
+  const heading = lines[0].match(/^(#{1,3})\s+(.+)$/);
+  if (heading && lines.length === 1) {
+    const level = heading[1].length;
+    const className = level <= 2 ? "chat-heading" : "chat-subheading";
+    return <p className={className} key={index}>{formatInlineMarkdown(heading[2])}</p>;
+  }
+  return <p className="chat-paragraph" key={index}>{formatInlineMarkdown(lines.join(" "))}</p>;
+}
+
+function formatInlineMarkdown(text: string) {
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(part => part.length > 0);
+  return parts.map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) return <strong key={index}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith("`") && part.endsWith("`")) return <code className="chat-code" key={index}>{part.slice(1, -1)}</code>;
+    return <Fragment key={index}>{part}</Fragment>;
+  });
+}
+
+function ChatTypingIndicator() {
+  return <div className="message ai typing-indicator message-enter" aria-live="polite" aria-label="Assistant is typing">
+    <div className="typing-dots"><span /><span /><span /></div>
+    <span className="typing-label">Searching your document and drafting a grounded answer…</span>
   </div>;
 }
 

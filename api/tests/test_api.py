@@ -66,7 +66,11 @@ def test_upload_completes_and_allows_chat(monkeypatch) -> None:
     monkeypatch.setattr(
         ai,
         "answer_question",
-        lambda *args, **kwargs: {"answer": "Fixture answer.", "citations": []},
+        lambda *args, **kwargs: {
+            "answer": "**Fixture answer.**",
+            "citations": [],
+            "suggested_prompts": ["What risks should I review?", "What deadlines matter?"],
+        },
     )
 
     png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
@@ -97,4 +101,6 @@ def test_upload_completes_and_allows_chat(monkeypatch) -> None:
         json={"message": "What is this document about?"},
     )
     assert chat.status_code == 200
-    assert chat.json()["answer"]
+    payload = chat.json()
+    assert payload["answer"]
+    assert payload["suggested_prompts"]
