@@ -2,6 +2,8 @@
 
 import { ChangeEvent, DragEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "./i18n/useTranslation";
+import { navKeys, pageMetaKeys, type NavKey } from "./i18n/nav";
+import type { MessageKey } from "./i18n/messages";
 
 type User = { id: string; email: string; name: string; role: string; organization_id: string };
 type DocumentItem = { id: string; name: string; content_type: string; size: number; status: string; stage?: string; progress: number; risk_level?: "high" | "medium" | "low"; risk_score?: number; classification?: string; created_at: string; updated_at: string; report?: Report | null };
@@ -53,7 +55,6 @@ function languageOptions(features: Features | null) {
 }
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-const navKeys = [["◈", "nav.dashboard"], ["▤", "nav.documents"], ["✦", "nav.chat"], ["□", "nav.calendar"], ["◫", "nav.compare"], ["◒", "nav.analytics"], ["⚙", "nav.settings"]] as const;
 
 function readToken() { return typeof window === "undefined" ? "" : window.localStorage.getItem("docuguardian_token") || ""; }
 
@@ -73,7 +74,7 @@ function greetingForNow() {
 export default function Home() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
   const [authView, setAuthView] = useState<"landing" | "auth">("landing");
-  const [active, setActive] = useState("Dashboard");
+  const [active, setActive] = useState<NavKey>("nav.dashboard");
   const [docs, setDocs] = useState<DocumentItem[]>([]);
   const [deadlines, setDeadlines] = useState<Deadline[]>([]);
   const [analytics, setAnalytics] = useState<Analytics | null>(null);
@@ -99,7 +100,7 @@ export default function Home() {
     if (calendar === "failed") setToast(t("settings.calendarFailed"));
     if (calendar) {
       window.history.replaceState({}, "", window.location.pathname);
-      if (provider) setActive("Settings");
+      if (provider) setActive("nav.settings");
     }
   }, [t]);
 
@@ -170,20 +171,20 @@ export default function Home() {
   function onFileChange(event: ChangeEvent<HTMLInputElement>) { handleUpload(event.target.files?.[0]); event.target.value = ""; }
   function onDrop(event: DragEvent<HTMLDivElement>) { event.preventDefault(); handleUpload(event.dataTransfer.files?.[0]); }
 
-  if (session === undefined) return <div className="loading-screen">Loading workspace…</div>;
+  if (session === undefined) return <div className="loading-screen">{t("loadingWorkspace")}</div>;
   if (!session) {
     if (authView === "landing") return <LandingPage onSignIn={() => setAuthView("auth")} onWatchDemo={() => setAuthView("auth")} features={features} />;
     return <AuthScreen features={features} onBack={() => setAuthView("landing")} onAuthenticated={next => setSession(next)} />;
   }
 
-  const currentPage = active === "Dashboard"
-    ? <Dashboard docs={docs} deadlines={deadlines} analytics={analytics} loading={loading} t={t} onUpload={() => setUploadOpen(true)} onOpenDocuments={() => setActive("Documents")} onOpenChat={() => setActive("AI Chat")} onOpenCalendar={() => setActive("Calendar")} />
-    : <WorkspaceScreen active={active} docs={docs} deadlines={deadlines} analytics={analytics} notifications={notifications} features={features} user={session.user} token={session.token} language={language} t={t} onLanguageChange={next => { writeLanguage(next); setLanguage(next); setToast(`Language set to ${next}.`); }} onUpload={() => setUploadOpen(true)} onRefresh={() => loadWorkspace(session)} onToast={setToast} />;
+  const currentPage = active === "nav.dashboard"
+    ? <Dashboard docs={docs} deadlines={deadlines} analytics={analytics} loading={loading} t={t} onUpload={() => setUploadOpen(true)} onOpenDocuments={() => setActive("nav.documents")} onOpenChat={() => setActive("nav.chat")} onOpenCalendar={() => setActive("nav.calendar")} />
+    : <WorkspaceScreen active={active} docs={docs} deadlines={deadlines} analytics={analytics} notifications={notifications} features={features} user={session.user} token={session.token} language={language} t={t} onLanguageChange={next => { writeLanguage(next); setLanguage(next); setToast(`${t("settings.languageChanged")} ${next}.`); }} onUpload={() => setUploadOpen(true)} onRefresh={() => loadWorkspace(session)} onToast={setToast} />;
 
   return <div className="app-shell" dir={isRtl ? "rtl" : "ltr"}>
-    <aside className="sidebar"><div className="brand"><span className="brand-mark">D</span><span>DocuGuardian</span></div><div className="nav-label">{t("workspace")}</div><nav className="nav">{navKeys.map(([icon, key]) => { const label = key === "nav.dashboard" ? "Dashboard" : key === "nav.documents" ? "Documents" : key === "nav.chat" ? "AI Chat" : key === "nav.calendar" ? "Calendar" : key === "nav.compare" ? "Compare" : key === "nav.analytics" ? "Analytics" : "Settings"; return <button key={key} className={active === label ? "active" : ""} onClick={() => setActive(label)}><span className="nav-icon">{icon}</span><span>{t(key as import("./i18n/messages").MessageKey)}</span></button>; })}</nav><div className="sidebar-bottom"><div className="user"><span className="avatar">{initials(session.user.name)}</span><div><b>{session.user.name}</b><small>{session.user.role} · {session.user.email}</small></div></div><button className="signout" onClick={signOut}>{t("signOut")}</button></div></aside>
-    <main className="main"><header className="topbar"><div className="crumb">Workspace / <strong>{active}</strong></div><div className="top-actions">{notifications.length > 0 && <span className="bell" title={`${notifications.length} notifications`}>🔔</span>}<span className="avatar">{initials(session.user.name)}</span></div></header><section className="content">{currentPage}</section></main>
-    {uploadOpen && <div className="upload-modal" role="dialog" aria-modal="true"><div className="modal"><div className="modal-head"><h2>Upload a document</h2><button className="close" onClick={() => setUploadOpen(false)} aria-label="Close">×</button></div><div className="drop" onDragOver={event => event.preventDefault()} onDrop={onDrop}><div className="drop-icon">↑</div><strong>Drop your document here</strong><p>We’ll analyze risks, deadlines, clauses, and recommendations.</p><label className="browse">Browse files<input type="file" accept=".pdf,.docx,.png,.jpg,.jpeg" onChange={onFileChange} /></label></div><div className="format">Supported: PDF, DOCX, JPG, PNG · Max file size 25 MB</div>{uploadError && <p className="form-error">{uploadError}</p>}</div></div>}
+    <aside className="sidebar"><div className="brand"><span className="brand-mark">D</span><span>DocuGuardian</span></div><div className="nav-label">{t("workspace")}</div><nav className="nav">{navKeys.map(([icon, key]) => <button key={key} className={active === key ? "active" : ""} onClick={() => setActive(key)}><span className="nav-icon">{icon}</span><span>{t(key)}</span></button>)}</nav><div className="sidebar-bottom"><div className="user"><span className="avatar">{initials(session.user.name)}</span><div><b>{session.user.name}</b><small>{session.user.role} · {session.user.email}</small></div></div><button className="signout" onClick={signOut}>{t("signOut")}</button></div></aside>
+    <main className="main"><header className="topbar"><div className="crumb">{t("workspace")} / <strong>{t(active)}</strong></div><div className="top-actions">{notifications.length > 0 && <span className="bell" title={`${notifications.length} notifications`}>🔔</span>}<span className="avatar">{initials(session.user.name)}</span></div></header><section className="content">{currentPage}</section></main>
+    {uploadOpen && <div className="upload-modal" role="dialog" aria-modal="true"><div className="modal"><div className="modal-head"><h2>{t("upload.title")}</h2><button className="close" onClick={() => setUploadOpen(false)} aria-label="Close">×</button></div><div className="drop" onDragOver={event => event.preventDefault()} onDrop={onDrop}><div className="drop-icon">↑</div><strong>{t("upload.dropTitle")}</strong><p>{t("upload.dropHint")}</p><label className="browse">{t("upload.browse")}<input type="file" accept=".pdf,.docx,.png,.jpg,.jpeg" onChange={onFileChange} /></label></div><div className="format">{t("upload.formats")}</div>{uploadError && <p className="form-error">{uploadError}</p>}</div></div>}
     {processing && processingVisible && <ProcessingModal processing={processing} onClose={() => setProcessingVisible(false)} />}
     {toast && <div className="toast">{toast}</div>}
   </div>;
@@ -253,13 +254,13 @@ function AuthScreen({ onAuthenticated, onBack, features }: { onAuthenticated: (s
   return <div className="auth-shell"><div className="auth-card card"><button className="text-button back-link" onClick={onBack}>← Back</button><div className="brand auth-brand"><span className="brand-mark">D</span><span>DocuGuardian</span></div><h1>{mode === "login" ? "Welcome back" : "Create your workspace"}</h1><p className="auth-subtitle">Understand important documents before they become problems.</p><form onSubmit={submit}>{mode === "register" && <label>Name<input value={name} onChange={event => setName(event.target.value)} required minLength={2} /></label>}<label>Email<input type="email" value={email} onChange={event => setEmail(event.target.value)} required /></label><label>Password<input type="password" value={password} onChange={event => setPassword(event.target.value)} required minLength={8} /></label>{error && <p className="form-error">{error}</p>}<button className="primary auth-submit" disabled={busy}>{busy ? "Please wait…" : mode === "login" ? "Sign in" : "Create account"}</button></form><button className="text-button" onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(""); }}>{mode === "login" ? "Create a new account" : "Already have an account? Sign in"}</button>{features?.demo_auth !== false && <button className="demo-button" onClick={demo}>Use local demo account</button>}</div></div>;
 }
 
-function Dashboard({ docs, deadlines, analytics, loading, t, onUpload, onOpenDocuments, onOpenChat, onOpenCalendar }: { docs: DocumentItem[]; deadlines: Deadline[]; analytics: Analytics | null; loading: boolean; t: (key: import("./i18n/messages").MessageKey) => string; onUpload: () => void; onOpenDocuments: () => void; onOpenChat: () => void; onOpenCalendar: () => void }) {
+function Dashboard({ docs, deadlines, analytics, loading, t, onUpload, onOpenDocuments, onOpenChat, onOpenCalendar }: { docs: DocumentItem[]; deadlines: Deadline[]; analytics: Analytics | null; loading: boolean; t: (key: MessageKey) => string; onUpload: () => void; onOpenDocuments: () => void; onOpenChat: () => void; onOpenCalendar: () => void }) {
   const protection = analytics?.protection_score ?? (analytics ? Math.max(0, 100 - analytics.average_risk_score) : 0);
   const greeting = greetingForNow() === "Good morning" ? t("dashboard.greetingMorning") : greetingForNow() === "Good afternoon" ? t("dashboard.greetingAfternoon") : t("dashboard.greetingEvening");
-  return <><div className="intro"><div><h1>{greeting}</h1><p>{t("dashboard.subtitle")}</p></div><button className="primary" onClick={onUpload}>＋ {t("uploadDocument")}</button></div><div className="stats"><Stat icon="▤" label={t("stat.documents")} value={analytics ? String(analytics.documents_uploaded) : "—"} foot="Persisted in workspace" /><Stat icon="!" label={t("stat.highRisk")} value={analytics ? String(analytics.high_risk_documents) : "—"} foot="Needs your attention" tone="red" /><Stat icon="◷" label={t("stat.deadlines")} value={analytics ? String(analytics.upcoming_deadlines) : "—"} foot="Extracted from documents" tone="orange" /><Stat icon="⚠" label={t("stat.fraudFlags")} value={analytics ? String(analytics.fraud_flagged_documents ?? 0) : "—"} foot="High-severity signals" tone="orange" /><Stat icon="✓" label={t("stat.protection")} value={analytics ? `${protection}%` : "—"} foot="From workspace analytics" tone="green" /></div>{loading ? <EmptyState title="Loading workspace" text="Fetching your documents and deadlines…" /> : <div className="grid"><div className="card docs"><div className="panel-head"><h2>Recent documents</h2><button className="view" onClick={onOpenDocuments}>View all →</button></div>{docs.length ? docs.slice(0, 6).map(doc => <div className="doc-row" key={doc.id}><DocumentRow doc={doc} /></div>) : <EmptyState title="No documents yet" text="Upload a document to start your first analysis." action={onUpload} actionLabel={t("uploadDocument")} />}</div><div><div className="card deadline"><div className="panel-head"><h2>Upcoming deadlines</h2><button className="view" onClick={onOpenCalendar}>Calendar →</button></div>{deadlines.length ? deadlines.slice(0, 5).map(deadline => <DeadlineRow key={deadline.id} deadline={deadline} />) : <EmptyState title="No deadlines found" text="Deadlines will appear here when they are extracted from a report." />}</div><div className="insight"><h3>✦ Evidence-backed workspace</h3><p>Open an analyzed report to review source evidence, confidence, deadlines, and recommendations.</p><button onClick={onOpenChat}>Ask DocuGuardian →</button></div></div></div>}</>;
+  return <><div className="intro"><div><h1>{greeting}</h1><p>{t("dashboard.subtitle")}</p></div><button className="primary" onClick={onUpload}>＋ {t("uploadDocument")}</button></div><div className="stats"><Stat icon="▤" label={t("stat.documents")} value={analytics ? String(analytics.documents_uploaded) : "—"} foot={t("stat.foot.documents")} /><Stat icon="!" label={t("stat.highRisk")} value={analytics ? String(analytics.high_risk_documents) : "—"} foot={t("stat.foot.highRisk")} tone="red" /><Stat icon="◷" label={t("stat.deadlines")} value={analytics ? String(analytics.upcoming_deadlines) : "—"} foot={t("stat.foot.deadlines")} tone="orange" /><Stat icon="⚠" label={t("stat.fraudFlags")} value={analytics ? String(analytics.fraud_flagged_documents ?? 0) : "—"} foot={t("stat.foot.fraud")} tone="orange" /><Stat icon="✓" label={t("stat.protection")} value={analytics ? `${protection}%` : "—"} foot={t("stat.foot.protection")} tone="green" /></div>{loading ? <EmptyState title={t("dashboard.loadingTitle")} text={t("dashboard.loadingHint")} /> : <div className="grid"><div className="card docs"><div className="panel-head"><h2>{t("dashboard.recentDocuments")}</h2><button className="view" onClick={onOpenDocuments}>{t("dashboard.viewAll")}</button></div>{docs.length ? docs.slice(0, 6).map(doc => <div className="doc-row" key={doc.id}><DocumentRow doc={doc} /></div>) : <EmptyState title={t("dashboard.noDocuments")} text={t("dashboard.noDocumentsHint")} action={onUpload} actionLabel={t("uploadDocument")} />}</div><div><div className="card deadline"><div className="panel-head"><h2>{t("dashboard.upcomingDeadlines")}</h2><button className="view" onClick={onOpenCalendar}>{t("dashboard.openCalendar")}</button></div>{deadlines.length ? deadlines.slice(0, 5).map(deadline => <DeadlineRow key={deadline.id} deadline={deadline} />) : <EmptyState title={t("dashboard.noDeadlines")} text={t("dashboard.noDeadlinesHint")} />}</div><div className="insight"><h3>{t("dashboard.insightTitle")}</h3><p>{t("dashboard.insightBody")}</p><button onClick={onOpenChat}>{t("dashboard.insightCta")}</button></div></div></div>}</>;
 }
 
-function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, features, user, token, language, t, onLanguageChange, onUpload, onRefresh, onToast }: { active: string; docs: DocumentItem[]; deadlines: Deadline[]; analytics: Analytics | null; notifications: NotificationItem[]; features: Features | null; user: User; token: string; language: string; t: (key: import("./i18n/messages").MessageKey) => string; onLanguageChange: (language: string) => void; onUpload: () => void; onRefresh: () => void; onToast: (message: string) => void }) {
+function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, features, user, token, language, t, onLanguageChange, onUpload, onRefresh, onToast }: { active: NavKey; docs: DocumentItem[]; deadlines: Deadline[]; analytics: Analytics | null; notifications: NotificationItem[]; features: Features | null; user: User; token: string; language: string; t: (key: MessageKey) => string; onLanguageChange: (language: string) => void; onUpload: () => void; onRefresh: () => void; onToast: (message: string) => void }) {
   const [report, setReport] = useState<Report | null>(null);
   const [reportDoc, setReportDoc] = useState<DocumentItem | null>(null);
   const [question, setQuestion] = useState("");
@@ -289,12 +290,12 @@ function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, fe
   }, [analyzedDocs, selectedChatDoc, compareIds]);
 
   useEffect(() => {
-    if (active !== "AI Chat") return;
+    if (active !== "nav.chat") return;
     if (messages.length === 0) setMessages([chatWelcome(!!selectedChatDoc)]);
   }, [active, selectedChatDoc, messages.length]);
 
   useEffect(() => {
-    if (active !== "AI Chat") return;
+    if (active !== "nav.chat") return;
     loadSessions().catch(() => undefined);
   }, [active, token]);
 
@@ -303,12 +304,12 @@ function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, fe
   }, [messages, chatLoading]);
 
   useEffect(() => {
-    if (active !== "Settings") return;
+    if (active !== "nav.settings") return;
     apiFetch("/api/v1/audit", token).then(async response => { if (response.ok) setAudit(await response.json()); }).catch(() => undefined);
   }, [active, token]);
 
   useEffect(() => {
-    if (active !== "Documents" || reportDoc) return;
+    if (active !== "nav.documents" || reportDoc) return;
     const firstCompleted = docs.find(doc => doc.status === "completed");
     if (firstCompleted) openReport(firstCompleted);
   }, [active, docs, reportDoc]);
@@ -445,21 +446,15 @@ function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, fe
     if (response.ok) { onToast("Document queued for re-analysis."); onRefresh(); }
   }
 
-  const titles: Record<string, [string, string]> = {
-    Documents: ["Document library", "Review every file, finding, and obligation in one place."],
-    "AI Chat": ["Ask your documents", "Grounded answers with source citations, not guesses."],
-    Calendar: ["Deadline calendar", "Stay ahead of renewals, payments, and notice periods."],
-    Compare: ["Document comparison", "Compare evidence-backed reports without fabricated differences."],
-    Analytics: ["Workspace analytics", "A clear view of persisted document risk and deadlines."],
-    Settings: ["Workspace settings", "Account, notifications, and organization context."],
-  };
-  const [title, subtitle] = titles[active] || titles.Documents;
+  const pageMeta = pageMetaKeys[active];
+  const title = t(pageMeta.title);
+  const subtitle = t(pageMeta.subtitle);
 
   return <>
-    <div className={`workspace-head${active === "AI Chat" ? " workspace-head-compact" : ""}`}><div><h1>{title}</h1>{active !== "AI Chat" && <p>{subtitle}</p>}</div>{active === "Documents" && <button className="primary" onClick={onUpload}>＋ Upload document</button>}</div>
+    <div className={`workspace-head${active === "nav.chat" ? " workspace-head-compact" : ""}`}><div><h1>{title}</h1>{active !== "nav.chat" && <p>{subtitle}</p>}</div>{active === "nav.documents" && <button className="primary" onClick={onUpload}>＋ {t("uploadDocument")}</button>}</div>
     {error && <p className="form-error">{error}</p>}
-    {active === "Documents" && <div className="workspace-grid"><div className="card workspace-card"><h2>All documents <span className="muted-count">({docs.length})</span></h2>{docs.length ? docs.map(doc => <div className="doc-row" key={doc.id}><DocumentRow doc={doc} compact /><div className="doc-actions"><button className="view" onClick={() => openReport(doc)} disabled={doc.status !== "completed"}>Report →</button>{(doc.status === "failed" || doc.status === "completed") && <button className="view" onClick={() => retryDoc(doc.id)}>Retry</button>}<button className="view danger" onClick={() => removeDoc(doc.id)}>Delete</button></div></div>) : <EmptyState title="No documents yet" text="Upload a document to begin." action={onUpload} actionLabel={t("uploadDocument")} />}</div><ReportPanel report={report} reportDoc={reportDoc} token={token} features={features} language={language} languages={languageOptions(features)} t={t} onToast={onToast} /></div>}
-    {active === "AI Chat" && <div className="chat-page"><div className="chat-shell">
+    {active === "nav.documents" && <div className="workspace-grid"><div className="card workspace-card"><h2>{t("documents.all")} <span className="muted-count">({docs.length})</span></h2>{docs.length ? docs.map(doc => <div className="doc-row" key={doc.id}><DocumentRow doc={doc} compact /><div className="doc-actions"><button className="btn btn-secondary btn-report" onClick={() => openReport(doc)} disabled={doc.status !== "completed"}>{doc.status === "completed" ? t("documents.viewReport") : t("documents.report")}</button>{(doc.status === "failed" || doc.status === "completed") && <button className="btn btn-outline" onClick={() => retryDoc(doc.id)}>{t("documents.retry")}</button>}<button className="btn btn-danger" onClick={() => removeDoc(doc.id)}>{t("documents.delete")}</button></div></div>) : <EmptyState title={t("documents.empty")} text={t("documents.emptyHint")} action={onUpload} actionLabel={t("uploadDocument")} />}</div><ReportPanel report={report} reportDoc={reportDoc} token={token} features={features} language={language} languages={languageOptions(features)} t={t} onToast={onToast} /></div>}
+    {active === "nav.chat" && <div className="chat-page"><div className="chat-shell">
       <div className="card chat-history">
         <button className="chat-new-btn primary" onClick={createNewChat} disabled={chatLoading || !selectedChatDoc}>＋ New chat</button>
         <div className="chat-history-list">
@@ -489,7 +484,7 @@ function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, fe
       <div className="card chat-box">
         <div className="chat-toolbar">
           <label>Document<select value={selectedChatDoc} onChange={event => handleDocumentChange(event.target.value)} disabled={chatLoading}><option value="">Select an analyzed document</option>{analyzedDocs.map(doc => <option key={doc.id} value={doc.id}>{doc.name}</option>)}</select></label>
-          {features?.translation && <label>Response language<LanguageSelect value={language} languages={languageOptions(features)} onChange={onLanguageChange} disabled={chatLoading} /></label>}
+          {features?.translation && <label>{t("chat.responseLanguage")}<LanguageSelect value={language} languages={languageOptions(features)} onChange={onLanguageChange} disabled={chatLoading} /></label>}
         </div>
         <div className="messages">
           {showStarterPrompts ? <div className="chat-empty-state">
@@ -509,14 +504,14 @@ function WorkspaceScreen({ active, docs, deadlines, analytics, notifications, fe
         </div>
       </div>
     </div></div>}
-    {active === "Calendar" && <CalendarScreen deadlines={deadlines} onRemind={remind} onRefresh={onRefresh} notifications={notifications} />}
-    {active === "Compare" && <ComparisonScreen docs={analyzedDocs} compareIds={compareIds} setCompareIds={setCompareIds} compare={compare} comparison={comparison} t={t} />}
-    {active === "Analytics" && <AnalyticsScreen analytics={analytics} />}
-    {active === "Settings" && <SettingsScreen user={user} features={features} audit={audit} notifications={notifications} language={language} languages={languageOptions(features)} token={token} t={t} onLanguageChange={onLanguageChange} onToast={onToast} />}
+    {active === "nav.calendar" && <CalendarScreen deadlines={deadlines} onRemind={remind} onRefresh={onRefresh} notifications={notifications} />}
+    {active === "nav.compare" && <ComparisonScreen docs={analyzedDocs} compareIds={compareIds} setCompareIds={setCompareIds} compare={compare} comparison={comparison} t={t} />}
+    {active === "nav.analytics" && <AnalyticsScreen analytics={analytics} t={t} />}
+    {active === "nav.settings" && <SettingsScreen user={user} features={features} audit={audit} notifications={notifications} language={language} languages={languageOptions(features)} token={token} t={t} onLanguageChange={onLanguageChange} onToast={onToast} />}
   </>;
 }
 
-function ReportPanel({ report, reportDoc, token, features, language, languages, t, onToast }: { report: Report | null; reportDoc: DocumentItem | null; token: string; features: Features | null; language: string; languages: string[]; t: (key: import("./i18n/messages").MessageKey) => string; onToast: (message: string) => void }) {
+function ReportPanel({ report, reportDoc, token, features, language, languages, t, onToast }: { report: Report | null; reportDoc: DocumentItem | null; token: string; features: Features | null; language: string; languages: string[]; t: (key: MessageKey) => string; onToast: (message: string) => void }) {
   const [translatedReport, setTranslatedReport] = useState<Report | null>(null);
   const [translating, setTranslating] = useState(false);
   const [downloadLanguage, setDownloadLanguage] = useState(language);
@@ -629,20 +624,20 @@ function ReportPanel({ report, reportDoc, token, features, language, languages, 
   }
 
   return <div className="card workspace-card report-panel">
-    <div className="report-header"><h2>{activeDoc.name}</h2><div className="doc-actions">{features?.translation && <button className="view" onClick={translateReport} disabled={translating}>{translating ? t("report.translating") : `${t("report.translate")} ${language}`}</button>}</div></div>
+    <div className="report-header"><h2>{activeDoc.name}</h2><div className="doc-actions">{features?.translation && <button className="btn btn-secondary" onClick={translateReport} disabled={translating}>{translating ? t("report.translating") : `${t("report.translate")} ${language}`}</button>}</div></div>
     <div className="metric"><strong>{activeReport.risk_score}</strong><small>{activeReport.risk_level} risk · {activeReport.classification} · confidence {Math.round(activeReport.confidence * 100)}%</small></div>
-    {features?.translation && <div className="language-note">Translations use your workspace language from Settings or AI Chat: <strong>{language}</strong></div>}
+    {features?.translation && <div className="language-note">{t("report.languageNote")} <strong>{language}</strong></div>}
     <div className="export-report-panel">
       <h3>{t("report.exportTitle")}</h3>
       <p className="muted">{t("report.exportDesc")}</p>
       <label className="export-language-label">{t("report.downloadLanguage")}<LanguageSelect value={downloadLanguage} languages={languages} onChange={setDownloadLanguage} disabled={pdfLoading || jsonLoading} /></label>
       <button className="primary report-generate-btn" onClick={() => downloadReport("pdf")} disabled={pdfLoading || jsonLoading}>{pdfLoading ? t("report.generatingPdf") : `${t("report.generatePdf")} (${downloadLanguage})`}</button>
       {pdfLoading ? <p className="report-generating-status">{t("report.generatingPdf")}</p> : null}
-      <button className="view report-secondary-link" onClick={() => downloadReport("json")} disabled={pdfLoading || jsonLoading}>{jsonLoading ? t("report.generatingPdf") : t("report.downloadJson")}</button>
+      <div className="report-action-row"><button className="btn btn-outline" onClick={() => downloadReport("json")} disabled={pdfLoading || jsonLoading}>{jsonLoading ? t("report.generatingPdf") : t("report.downloadJson")}</button></div>
     </div>
     <p className="report-summary">{displayedReport.summary}</p>
-    {features?.voice && <div className="voice-summary-panel"><h3>{t("report.voice")}</h3><p className="muted">{t("report.voiceDesc")}</p><label className="voice-language-label">{t("report.voiceLanguage")}<LanguageSelect value={voiceLanguage} languages={languages} onChange={setVoiceLanguage} disabled={voiceLoading} /></label>{voiceReady ? <><audio ref={audioRef} className="voice-player" controls src={voiceUrl!} /><button className="view voice-regenerate-link" onClick={playVoice} disabled={voiceLoading}>{voiceLoading ? t("report.voiceGenerating") : t("report.voiceRegenerate")}</button></> : <button className="primary report-generate-btn" onClick={playVoice} disabled={voiceLoading}>{voiceLoading ? t("report.voiceGenerating") : `${t("report.voiceGenerate")} (${voiceLanguage})`}</button>}{voiceLoading ? <p className="report-generating-status">{t("report.voiceGenerating")}</p> : null}</div>}
-    {translatedReport && <div className="translation-panel"><h3>Translated report ({language})</h3><p className="report-summary">All report sections are translated while the original source citations remain unchanged.</p></div>}
+    {features?.voice && <div className="voice-summary-panel"><h3>{t("report.voice")}</h3><p className="muted">{t("report.voiceDesc")}</p><label className="voice-language-label">{t("report.voiceLanguage")}<LanguageSelect value={voiceLanguage} languages={languages} onChange={setVoiceLanguage} disabled={voiceLoading} /></label>{voiceReady ? <><audio ref={audioRef} className="voice-player" controls src={voiceUrl!} /><div className="report-action-row"><button className="btn btn-outline voice-regenerate-link" onClick={playVoice} disabled={voiceLoading}>{voiceLoading ? t("report.voiceGenerating") : t("report.voiceRegenerate")}</button></div></> : <button className="primary report-generate-btn" onClick={playVoice} disabled={voiceLoading}>{voiceLoading ? t("report.voiceGenerating") : `${t("report.voiceGenerate")} (${voiceLanguage})`}</button>}{voiceLoading ? <p className="report-generating-status">{t("report.voiceGenerating")}</p> : null}</div>}
+    {translatedReport && <div className="translation-panel"><h3>{t("report.translate")} ({language})</h3><p className="report-summary">{t("report.translatedPanel")}</p></div>}
     <h3>{t("report.keyDetails")}</h3>
     {displayedReport.entities?.length ? displayedReport.entities.map((entity, index) => <div className="finding" key={`entity-${index}`}><div className="finding-top"><strong>{entity.label}</strong><span className="pill low">{entity.value}</span></div><div className="citation">{entity.page ? `page ${entity.page}` : ""}{entity.text_span ? ` · “${entity.text_span}”` : ""}{entity.confidence ? ` · ${Math.round(entity.confidence * 100)}% confidence` : ""}</div></div>) : <p className="muted">{t("report.noEntities")}</p>}
     <h3>{t("report.riskAnalysis")}</h3>
@@ -699,7 +694,7 @@ function CalendarScreen({ deadlines, onRemind, onRefresh, notifications }: { dea
   </div>;
 }
 
-function ComparisonScreen({ docs, compareIds, setCompareIds, compare, comparison, t }: { docs: DocumentItem[]; compareIds: string[]; setCompareIds: (ids: string[]) => void; compare: () => void; comparison: Record<string, unknown> | null; t: (key: import("./i18n/messages").MessageKey) => string }) {
+function ComparisonScreen({ docs, compareIds, setCompareIds, compare, comparison, t }: { docs: DocumentItem[]; compareIds: string[]; setCompareIds: (ids: string[]) => void; compare: () => void; comparison: Record<string, unknown> | null; t: (key: MessageKey) => string }) {
   const list = (value: unknown) => Array.isArray(value) ? value.map(String) : [];
   const modified = Array.isArray(comparison?.modified_clauses) ? comparison?.modified_clauses as Array<Record<string, string>> : [];
   const deadlineChanges = Array.isArray(comparison?.deadline_changes) ? comparison?.deadline_changes as Array<Record<string, string>> : [];
@@ -709,19 +704,19 @@ function ComparisonScreen({ docs, compareIds, setCompareIds, compare, comparison
   return <div className="card workspace-card"><h2>{t("compare.title")}</h2>{docs.length < 2 ? <EmptyState title="Two analyzed documents required" text={t("compare.needTwo")} /> : <><div className="comparison"><select value={compareIds[0]} onChange={event => setCompareIds([event.target.value, compareIds[1]])}>{docs.map(doc => <option key={doc.id} value={doc.id}>{doc.name}</option>)}</select><select value={compareIds[1]} onChange={event => setCompareIds([compareIds[0], event.target.value])}>{docs.map(doc => <option key={doc.id} value={doc.id}>{doc.name}</option>)}</select></div><button className="primary" style={{ marginTop: 16 }} onClick={compare}>{t("compare.button")}</button>{comparison && <div className="comparison-result"><div className="comparison-metrics"><div className="metric"><strong>{String(comparison.similarity_score)}%</strong><small>{t("compare.similarity")}</small></div>{riskDelta !== null && <div className="metric"><strong>{riskDelta > 0 ? `+${riskDelta}` : riskDelta}</strong><small>{t("compare.riskDelta")}</small></div>}{riskLevelChanged && <div className="metric warning-metric"><strong>!</strong><small>{t("compare.riskLevelChanged")}</small></div>}</div><div className="comparison"><div className="comparison-col"><h3>{t("compare.addedRisks")}</h3>{list(comparison.added_risks).map(item => <p key={item}>＋ {item}</p>)}{!list(comparison.added_risks).length && <p className="muted">—</p>}<h3>{t("compare.addedDeadlines")}</h3>{list(comparison.added_deadlines).map(item => <p key={item}>＋ {item}</p>)}{!list(comparison.added_deadlines).length && <p className="muted">—</p>}<h3>{t("compare.addedClauses")}</h3>{list(comparison.added_clauses).map(item => <p key={item}>＋ {item}</p>)}{!list(comparison.added_clauses).length && <p className="muted">—</p>}</div><div className="comparison-col"><h3>{t("compare.removedRisks")}</h3>{list(comparison.removed_risks).map(item => <p key={item}>− {item}</p>)}{!list(comparison.removed_risks).length && <p className="muted">—</p>}<h3>{t("compare.removedDeadlines")}</h3>{list(comparison.removed_deadlines).map(item => <p key={item}>− {item}</p>)}{!list(comparison.removed_deadlines).length && <p className="muted">—</p>}<h3>{t("compare.removedClauses")}</h3>{list(comparison.removed_clauses).map(item => <p key={item}>− {item}</p>)}{!list(comparison.removed_clauses).length && <p className="muted">—</p>}</div></div>{!!deadlineChanges.length && <><h3>{t("compare.deadlineChanges")}</h3>{deadlineChanges.map(item => <div className="finding" key={item.title}><strong>{item.title}</strong><p>{formatDate(item.document_a_date || "")} → {formatDate(item.document_b_date || "")}</p></div>)}</>}{!!modified.length && <><h3>{t("compare.modifiedClauses")}</h3>{modified.map(item => <div className="finding" key={item.title}><strong>{item.title}</strong><p>A ({item.document_a_severity}): {item.document_a_excerpt}</p><p>B ({item.document_b_severity}): {item.document_b_excerpt}</p></div>)}</>}{disclaimer && <p className="comparison-disclaimer">{disclaimer}</p>}</div>}</>}</div>;
 }
 
-function AnalyticsScreen({ analytics }: { analytics: Analytics | null }) {
-  if (!analytics) return <EmptyState title="Analytics unavailable" text="Analytics will appear after the workspace loads." />;
+function AnalyticsScreen({ analytics, t }: { analytics: Analytics | null; t: (key: MessageKey) => string }) {
+  if (!analytics) return <EmptyState title={t("page.analytics.title")} text={t("page.analytics.subtitle")} />;
   const total = Math.max(analytics.documents_uploaded, 1);
   const monthlyMax = Math.max(1, ...(analytics.monthly_uploads || []).map(item => item.count));
   return <div className="workspace-grid">
-    <div className="card workspace-card"><h2>Risk distribution</h2><div className="chart-row"><div className="bar" style={{ height: `${Math.max(6, analytics.high_risk_documents / total * 100)}%` }}><span>{analytics.high_risk_documents}</span></div><div className="bar" style={{ height: `${Math.max(6, analytics.medium_risk_documents / total * 100)}%`, background: "linear-gradient(#f8c75e,#f59e0b)" }}><span>{analytics.medium_risk_documents}</span></div><div className="bar" style={{ height: `${Math.max(6, analytics.low_risk_documents / total * 100)}%`, background: "linear-gradient(#53d3a5,#10b981)" }}><span>{analytics.low_risk_documents}</span></div></div><div className="chart-labels"><span>High risk</span><span>Medium</span><span>Low risk</span></div></div>
-    <div className="card workspace-card"><h2>Workspace health</h2><div className="stats analytics-stats"><Stat icon="▤" label="Documents" value={String(analytics.documents_uploaded)} foot="total" /><Stat icon="!" label="Avg. risk" value={String(analytics.average_risk_score)} foot="out of 100" tone="orange" /><Stat icon="✓" label="Protection" value={`${analytics.protection_score}%`} foot="score" tone="green" /></div></div>
+    <div className="card workspace-card"><h2>{t("stat.highRisk")}</h2><div className="chart-row"><div className="bar" style={{ height: `${Math.max(6, analytics.high_risk_documents / total * 100)}%` }}><span>{analytics.high_risk_documents}</span></div><div className="bar" style={{ height: `${Math.max(6, analytics.medium_risk_documents / total * 100)}%`, background: "linear-gradient(#f8c75e,#f59e0b)" }}><span>{analytics.medium_risk_documents}</span></div><div className="bar" style={{ height: `${Math.max(6, analytics.low_risk_documents / total * 100)}%`, background: "linear-gradient(#53d3a5,#10b981)" }}><span>{analytics.low_risk_documents}</span></div></div><div className="chart-labels"><span>{t("stat.highRisk")}</span><span>{t("stat.deadlines")}</span><span>{t("stat.protection")}</span></div></div>
+    <div className="card workspace-card"><h2>{t("page.analytics.title")}</h2><div className="stats analytics-stats"><Stat icon="▤" label={t("stat.documents")} value={String(analytics.documents_uploaded)} foot="total" /><Stat icon="!" label={t("stat.highRisk")} value={String(analytics.average_risk_score)} foot="out of 100" tone="orange" /><Stat icon="✓" label={t("stat.protection")} value={`${analytics.protection_score}%`} foot="score" tone="green" /></div></div>
     <div className="card workspace-card"><h2>Categories</h2>{analytics.categories?.length ? analytics.categories.map(item => <div className="timeline-item" key={item.category}><span className="timeline-dot" /><div><strong>{item.category}</strong><small>{item.count} documents</small></div></div>) : <p className="muted">No classifications yet.</p>}</div>
     <div className="card workspace-card"><h2>Monthly uploads</h2><div className="chart-row">{(analytics.monthly_uploads || []).map(item => <div className="bar" key={item.month} style={{ height: `${Math.max(6, item.count / monthlyMax * 100)}%` }} title={item.month}><span>{item.count}</span></div>)}</div><div className="chart-labels">{(analytics.monthly_uploads || []).map(item => <span key={item.month}>{item.month}</span>)}</div></div>
   </div>;
 }
 
-function SettingsScreen({ user, features, audit, notifications, language, languages, token, t, onLanguageChange, onToast }: { user: User; features: Features | null; audit: AuditItem[]; notifications: NotificationItem[]; language: string; languages: string[]; token: string; t: (key: import("./i18n/messages").MessageKey) => string; onLanguageChange: (language: string) => void; onToast: (message: string) => void }) {
+function SettingsScreen({ user, features, audit, notifications, language, languages, token, t, onLanguageChange, onToast }: { user: User; features: Features | null; audit: AuditItem[]; notifications: NotificationItem[]; language: string; languages: string[]; token: string; t: (key: MessageKey) => string; onLanguageChange: (language: string) => void; onToast: (message: string) => void }) {
   const [integrations, setIntegrations] = useState<CalendarIntegration[]>([]);
   const [calendarEnabled, setCalendarEnabled] = useState(false);
 
@@ -774,7 +769,7 @@ function SettingsScreen({ user, features, audit, notifications, language, langua
   }
 
   return <div className="workspace-grid">
-    <div className="card workspace-card"><h2>{t("settings.account")}</h2><p className="report-summary"><strong>{user.name}</strong><br />{user.email}<br />Role: {user.role}<br />Organization: {user.organization_id}</p>{features?.translation && <><h3>{t("settings.language")}</h3><p className="muted">{t("settings.languageHint")}</p><LanguageSelect value={language} languages={languages} onChange={onLanguageChange} /></>}<h3>{t("settings.features")}</h3><p className="muted">Voice: {features?.voice ? "on" : "off"} · Translation: {features?.translation ? "on" : "off"} · Fraud: {features?.fraud ? "on" : "off"} · Demo auth: {features?.demo_auth ? "on" : "off"}</p>{calendarEnabled && <><h3>{t("settings.calendar")}</h3><div className="calendar-actions"><button className="view" onClick={connectGoogle}>{t("settings.connectGoogle")}</button><button className="view" onClick={connectOutlook}>{t("settings.connectOutlook")}</button><button className="primary" onClick={syncAll}>{t("settings.syncNow")}</button></div>{integrations.map(item => <div className="finding" key={item.id}><strong>{item.provider}</strong><p>{item.last_sync_at ? `Last sync: ${formatDate(item.last_sync_at)}` : "Not synced yet"}</p><label className="action-item"><input type="checkbox" checked={item.auto_sync} onChange={event => toggleAutoSync(item, event.target.checked)} /> {t("settings.autoSync")}</label><button className="view danger" onClick={() => disconnect(item.provider)}>{t("settings.disconnect")}</button></div>)}{!integrations.length && <p className="muted">Connect Google or Outlook to push extracted deadlines.</p>}</>}</div>
+    <div className="card workspace-card"><h2>{t("settings.account")}</h2><p className="report-summary"><strong>{user.name}</strong><br />{user.email}<br />{t("common.role")}: {user.role}<br />{t("common.organization")}: {user.organization_id}</p>{features?.translation && <><h3>{t("settings.language")}</h3><p className="muted">{t("settings.languageHint")}</p><LanguageSelect value={language} languages={languages} onChange={onLanguageChange} /></>}<h3>{t("settings.features")}</h3><p className="muted">Voice: {features?.voice ? t("common.on") : t("common.off")} · Translation: {features?.translation ? t("common.on") : t("common.off")} · Fraud: {features?.fraud ? t("common.on") : t("common.off")} · Demo auth: {features?.demo_auth ? t("common.on") : t("common.off")}</p>{calendarEnabled && <><h3>{t("settings.calendar")}</h3><div className="calendar-actions"><button className="view" onClick={connectGoogle}>{t("settings.connectGoogle")}</button><button className="view" onClick={connectOutlook}>{t("settings.connectOutlook")}</button><button className="primary" onClick={syncAll}>{t("settings.syncNow")}</button></div>{integrations.map(item => <div className="finding" key={item.id}><strong>{item.provider}</strong><p>{item.last_sync_at ? `Last sync: ${formatDate(item.last_sync_at)}` : "Not synced yet"}</p><label className="action-item"><input type="checkbox" checked={item.auto_sync} onChange={event => toggleAutoSync(item, event.target.checked)} /> {t("settings.autoSync")}</label><button className="view danger" onClick={() => disconnect(item.provider)}>{t("settings.disconnect")}</button></div>)}{!integrations.length && <p className="muted">Connect Google or Outlook to push extracted deadlines.</p>}</>}</div>
     <div className="card workspace-card"><h2>{t("settings.notifications")}</h2>{notifications.length ? notifications.slice(0, 8).map(item => <div className="finding" key={item.id}><strong>{item.title}</strong><p>{item.body}</p></div>) : <p className="muted">{t("settings.noNotifications")}</p>}<h2>{t("settings.audit")}</h2>{audit.length ? audit.slice(0, 12).map(item => <div className="timeline-item" key={item.id}><span className="timeline-dot" /><div><strong>{item.action}</strong><small>{formatDate(item.created_at)}{item.document_id ? ` · ${item.document_id.slice(0, 8)}` : ""}</small></div></div>) : <p className="muted">{t("settings.noAudit")}</p>}</div>
   </div>;
 }
@@ -892,7 +887,7 @@ function ProcessingModal({ processing, onClose }: { processing: { name: string; 
   return <div className="upload-modal" role="dialog" aria-modal="true"><div className="modal processing-modal"><div className="modal-head"><h2>Analyzing {processing.name}</h2><button className="close" onClick={onClose} aria-label="Close">×</button></div><div className="processing-body"><div className="drop-icon">✦</div><p>Processing is running in the document pipeline.</p><div className="score-track"><div className="score-fill" style={{ width: `${processing.progress}%` }} /></div><strong>{processing.progress}% · {processing.stage}</strong><div className="stage-list">{processing.stages.map(stage => <div key={stage.stage} className={stage.status}><span>{stage.status === "completed" ? "✓" : stage.status === "running" ? "•" : "○"}</span>{stage.stage}</div>)}</div></div></div></div>;
 }
 function Stat({ icon, label, value, foot, tone }: { icon: string; label: string; value: string; foot: React.ReactNode; tone?: string }) { return <div className="card stat"><div className="stat-top"><span>{label}</span><span className="stat-icon" data-tone={tone}>{icon}</span></div><div className="stat-value">{value}</div><div className="stat-foot">{foot}</div></div>; }
-function EmptyState({ title, text, action, actionLabel }: { title: string; text: string; action?: () => void; actionLabel?: string }) { return <div className="empty-state"><strong>{title}</strong><p>{text}</p>{action && <button className="view" onClick={action}>{actionLabel || "Try again"}</button>}</div>; }
+function EmptyState({ title, text, action, actionLabel }: { title: string; text: string; action?: () => void; actionLabel?: string }) { return <div className="empty-state"><strong>{title}</strong><p>{text}</p>{action && <button className="btn btn-secondary" onClick={action}>{actionLabel || "Try again"}</button>}</div>; }
 function parseDate(value: string) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
