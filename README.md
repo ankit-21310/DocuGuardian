@@ -341,7 +341,72 @@ Users can listen to concise audio summaries instead of reading lengthy documents
                  │ Alerts & Notifications  │
                  └─────────────────────────┘
 ```
+---
+# 🚀 How We Built This Project with Codex & GPT-5.6
 
+DocuGuardian was designed and developed with extensive collaboration between our team, **Codex**, and **GPT-5.6**. Rather than using AI only for document analysis, we also used it throughout the engineering and product development process.
+
+## 🧠 Product Design & Architecture
+
+Codex and GPT-5.6 helped us:
+
+- Design the overall multi-stage document intelligence pipeline.
+- Refine the system architecture for frontend, backend, AI pipeline, storage, and database services.
+- Break down the project into modular components that could be developed independently.
+- Improve feature prioritization and technical planning throughout development.
+
+## 💻 Software Engineering
+
+During implementation, Codex accelerated development by assisting with:
+
+- Building the Next.js frontend and responsive UI components.
+- Developing FastAPI backend APIs and request handling.
+- Designing modular project structure and reusable components.
+- Creating Docker Compose configuration for local development.
+- Implementing environment configuration and deployment setup.
+- Refactoring code to improve readability and maintainability.
+- Debugging integration issues between frontend and backend.
+- Assisting with API integration and error handling.
+
+## 🤖 GPT-5.6 Powered AI Features
+
+GPT-5.6 powers the core intelligence behind DocuGuardian, including:
+
+- Plain-language document summaries.
+- Structured information extraction.
+- Risk and obligation analysis.
+- Hidden penalty detection.
+- Clause severity classification.
+- Personalized action plan generation.
+- Grounded document-aware question answering.
+- Multi-document reasoning across uploaded files.
+- Recommendation generation.
+- Multi-language translation.
+- Voice summary generation.
+
+## ⚡ Codex Development Contributions
+
+Codex significantly accelerated engineering productivity by helping with:
+
+- Rapid feature prototyping.
+- Code generation for repetitive components.
+- API endpoint implementation.
+- UI improvements and component refactoring.
+- Bug fixing and debugging.
+- Project documentation.
+- README improvements.
+- Docker and deployment configuration.
+- Repository organization and code cleanup.
+
+## 🎯 Human Decisions
+
+While Codex and GPT-5.6 accelerated development, all key product decisions—including the overall concept, user experience, feature selection, AI workflow, and final engineering decisions—were designed, reviewed, integrated, and validated by the project team.
+
+AI acted as an engineering collaborator rather than replacing human decision making.
+
+## 📌 Summary
+
+Codex accelerated the software engineering workflow, while GPT-5.6 powers the intelligent document analysis capabilities. Together they enabled us to build DocuGuardian faster while maintaining a modular, production-oriented architecture focused on proactive document protection.
 ---
 
 # Technology Stack
