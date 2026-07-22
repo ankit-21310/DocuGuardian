@@ -6,10 +6,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .ai import analyze_file, embed_texts
-from .config import AI_MODE, ENABLE_FIXTURE_ANALYSIS, PIPELINE_STAGES
+from . import ai
+from .config import AI_MODE, ENABLE_FIXTURE_ANALYSIS, FEATURE_FRAUD, PIPELINE_STAGES
 from .db import DB_LOCK, connect
-from .parsing import chunk_text, extract_text, split_sections
+from .parsing import chunk_text, extract_text, is_low_quality_extraction, split_sections
 from .storage import materialize_object
 
 
@@ -31,6 +31,7 @@ def run_pipeline(
     path = materialize_object(storage_key, upload_dir)
     intelligence: dict[str, Any] | None = None
     extracted = ""
+    force_vision = False
 
     for index, stage in enumerate(PIPELINE_STAGES, 1):
         progress = round((index - 1) / len(PIPELINE_STAGES) * 100)
@@ -39,10 +40,13 @@ def run_pipeline(
 
         if stage == "OCR and parsing":
             extracted = extract_text(path, filename)
+            force_vision = is_low_quality_extraction(extracted)
+            if force_vision and not extracted.startswith("[Image document:"):
+                extracted = f"[OCR fallback: vision analysis required]\n{extracted[:500]}"
             with DB_LOCK, connect() as db:
                 db.execute("UPDATE documents SET extracted_text=? WHERE id=?", (extracted, document_id))
         elif stage == "Classification":
-            intelligence = _load_intelligence(path, filename, extracted)
+            intelligence = _load_intelligence(path, filename, extracted, force_vision=force_vision)
             with DB_LOCK, connect() as db:
                 db.execute(
                     "UPDATE documents SET classification=? WHERE id=?",
@@ -82,8 +86,29 @@ def run_pipeline(
                 )
                 for risk in intelligence.get("risks", [])
             ], columns="id,document_id,title,severity,explanation,recommendation,source,page,text_span,confidence,is_penalty")
+            _replace_children(document_id, "document_obligations", [
+                (
+                    str(uuid.uuid4()), document_id, item["title"], item.get("party", "Unknown party"),
+                    item["description"], item["severity"], item.get("due_date"), item.get("page"),
+                    item.get("text_span"), item.get("confidence"),
+                )
+                for item in intelligence.get("obligations", [])
+            ], columns="id,document_id,title,party,description,severity,due_date,page,text_span,confidence")
+            _replace_children(document_id, "document_fraud_indicators", [
+                (
+                    str(uuid.uuid4()), document_id, item["title"], item["indicator_type"],
+                    item["severity"], item["explanation"], item.get("page"), item.get("text_span"),
+                    item.get("confidence"),
+                )
+                for item in (intelligence.get("fraud_indicators", []) if FEATURE_FRAUD else [])
+            ], columns="id,document_id,title,indicator_type,severity,explanation,page,text_span,confidence")
         elif stage == "Deadline detection":
             assert intelligence is not None
+            try:
+                from . import calendar_sync as calendar_sync_module
+                calendar_sync_module.delete_document_events(document_id, organization_id)
+            except Exception:
+                pass
             with DB_LOCK, connect() as db:
                 db.execute("DELETE FROM deadlines WHERE document_id=?", (document_id,))
                 for deadline in intelligence.get("deadlines", []):
@@ -109,7 +134,7 @@ def run_pipeline(
             ], columns="id,document_id,title,detail,priority,status,due_date,ordinal")
         elif stage == "Embeddings":
             chunks = chunk_text(extracted or json.dumps(intelligence or {}))
-            embeddings = embed_texts([chunk["content"] for chunk in chunks]) if chunks else []
+            embeddings = ai.embed_texts([chunk["content"] for chunk in chunks]) if chunks else []
             _replace_children(document_id, "document_chunks", [
                 (
                     str(uuid.uuid4()), document_id, chunk["content"], chunk.get("page"), chunk["ordinal"],
@@ -137,26 +162,32 @@ def run_pipeline(
     raise RuntimeError("Pipeline finished without report generation")
 
 
-def _load_intelligence(path: Path, filename: str, extracted: str) -> dict[str, Any]:
+def _load_intelligence(path: Path, filename: str, extracted: str, *, force_vision: bool = False) -> dict[str, Any]:
     if AI_MODE == "demo":
         if not ENABLE_FIXTURE_ANALYSIS:
             raise RuntimeError("AI_MODE=demo is disabled. Set ENABLE_FIXTURE_ANALYSIS=true for fixture runs only.")
-        return {
+        intelligence = {
             "summary": f"{filename} was analyzed using explicit fixture analysis.",
             "classification": "Document",
             "risk_score": 42,
             "risk_level": "medium",
             "confidence": 0.5,
-            "entities": [],
+            "entities": [{"label": "Document type", "value": "Fixture", "confidence": 0.5, "page": 1, "text_span": None}],
             "clauses": [],
             "risks": [],
+            "obligations": [{"title": "Review obligations", "party": "You", "description": "Review all contractual duties manually.", "severity": "medium", "due_date": None, "page": 1, "text_span": None, "confidence": 0.5}],
+            "fraud_indicators": [],
             "deadlines": [],
             "recommendations": ["Review the source document manually."],
             "action_plan": [{"title": "Manual review", "detail": "Fixture mode produced limited findings.", "priority": "medium", "due_date": None}],
             "evidence": [],
             "model_version": "fixture",
         }
-    return analyze_file(path, filename, extracted)
+    else:
+        intelligence = ai.analyze_file(path, filename, extracted, force_vision=force_vision)
+    if not FEATURE_FRAUD:
+        intelligence["fraud_indicators"] = []
+    return intelligence
 
 
 def _replace_children(document_id: str, table: str, rows: list[tuple], columns: str) -> None:
@@ -180,13 +211,21 @@ def _assemble_report(document_id: str, intelligence: dict[str, Any]) -> dict[str
             (document_id,),
         ))
         action_plan = fetchall(db.execute(
-            "SELECT title,detail,priority,due_date,status FROM action_items WHERE document_id=? ORDER BY ordinal",
+            "SELECT id,title,detail,priority,due_date,status FROM action_items WHERE document_id=? ORDER BY ordinal",
             (document_id,),
         ))
         entities = fetchall(db.execute(
             "SELECT label,value,confidence,page,text_span FROM document_entities WHERE document_id=?",
             (document_id,),
         ))
+        obligations = fetchall(db.execute(
+            "SELECT title,party,description,severity,due_date,page,text_span,confidence FROM document_obligations WHERE document_id=?",
+            (document_id,),
+        ))
+        fraud_indicators = fetchall(db.execute(
+            "SELECT title,indicator_type,severity,explanation,page,text_span,confidence FROM document_fraud_indicators WHERE document_id=?",
+            (document_id,),
+        )) if FEATURE_FRAUD else []
 
     report_risks = [
         {
@@ -203,20 +242,27 @@ def _assemble_report(document_id: str, intelligence: dict[str, Any]) -> dict[str
         for risk in risks
     ] or intelligence.get("risks", [])
 
+    score = max(0, min(100, int(intelligence.get("risk_score", 0))))
+    risk_level = str(intelligence.get("risk_level", "low")).lower()
+    if risk_level not in {"low", "medium", "high"}:
+        risk_level = "high" if score >= 70 else "medium" if score >= 35 else "low"
+
     return {
         "summary": intelligence.get("summary", ""),
         "classification": intelligence.get("classification", "Document"),
-        "risk_score": int(intelligence.get("risk_score", 0)),
-        "risk_level": intelligence.get("risk_level", "low"),
+        "risk_score": score,
+        "risk_level": risk_level,
         "confidence": intelligence.get("confidence", 0.5),
         "entities": entities or intelligence.get("entities", []),
         "clauses": clauses or intelligence.get("clauses", []),
+        "obligations": obligations or intelligence.get("obligations", []),
+        "fraud_indicators": (fraud_indicators or intelligence.get("fraud_indicators", [])) if FEATURE_FRAUD else [],
         "risks": report_risks,
         "hidden_penalties": [risk for risk in report_risks if risk.get("is_penalty")],
         "deadlines": intelligence.get("deadlines", []),
         "recommendations": intelligence.get("recommendations", []),
         "action_plan": [
-            {"title": item["title"], "detail": item["detail"], "priority": item["priority"], "due_date": item.get("due_date"), "status": item.get("status", "open")}
+            {"id": item["id"], "title": item["title"], "detail": item["detail"], "priority": item["priority"], "due_date": item.get("due_date"), "status": item.get("status", "open")}
             for item in action_plan
         ] or intelligence.get("action_plan", []),
         "evidence": intelligence.get("evidence", []),

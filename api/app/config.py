@@ -58,8 +58,22 @@ ENABLE_FIXTURE_ANALYSIS = os.getenv("ENABLE_FIXTURE_ANALYSIS", "false").lower() 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if origin.strip()]
-FEATURE_VOICE = os.getenv("FEATURE_VOICE", "false").lower() in {"1", "true", "yes"}
-FEATURE_TRANSLATION = os.getenv("FEATURE_TRANSLATION", "false").lower() in {"1", "true", "yes"}
+def _service_feature_enabled(name: str) -> bool:
+    """Enable AI add-ons automatically when an API key is available.
+
+    An explicit environment value still wins, so deployments can disable a
+    paid feature without changing application code.
+    """
+    configured = os.getenv(name)
+    if not configured or not configured.strip():
+        return bool(os.getenv("OPENAI_API_KEY", "").strip())
+    return configured.lower() in {"1", "true", "yes", "on"}
+
+
+FEATURE_VOICE = _service_feature_enabled("FEATURE_VOICE")
+FEATURE_TRANSLATION = _service_feature_enabled("FEATURE_TRANSLATION")
+FEATURE_FRAUD = os.getenv("FEATURE_FRAUD", "false").strip().lower() in {"1", "true", "yes", "on"}
+FEATURE_EXTERNAL_CALENDAR = os.getenv("FEATURE_EXTERNAL_CALENDAR", "").strip().lower() in {"1", "true", "yes", "on"}
 SUPPORTED_LANGUAGES = tuple(
     language.strip()
     for language in os.getenv(
@@ -68,6 +82,27 @@ SUPPORTED_LANGUAGES = tuple(
     ).split(",")
     if language.strip()
 )
+LANGUAGE_CODES: dict[str, str] = {
+    "English": "en",
+    "Spanish": "es",
+    "Hindi": "hi",
+    "French": "fr",
+    "German": "de",
+    "Arabic": "ar",
+    "Portuguese": "pt",
+    "Chinese (Simplified)": "zh",
+    "Japanese": "ja",
+    "Marathi": "mr",
+    "Tamil": "ta",
+}
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/api/v1/integrations/calendar/google/callback").strip()
+MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID", "").strip()
+MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET", "").strip()
+MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "common").strip()
+MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI", "http://localhost:8000/api/v1/integrations/calendar/outlook/callback").strip()
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").strip()
 SMTP_URL = os.getenv("SMTP_URL", "").strip()
 NOTIFICATION_FROM = os.getenv("NOTIFICATION_FROM", "noreply@docuguardian.local")
 

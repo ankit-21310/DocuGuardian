@@ -7,12 +7,14 @@ import time
 
 from app.db import connect, fetchone
 from app.main import init_db, process_document
+from app.notifications import process_due_reminders
 
 
 def run() -> None:
     init_db()
     poll_seconds = float(os.getenv("WORKER_POLL_SECONDS", "1"))
     while True:
+        process_due_reminders()
         with connect() as db:
             row = fetchone(db.execute(
                 "SELECT d.id, d.organization_id, m.user_id FROM documents d "

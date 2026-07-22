@@ -6,24 +6,33 @@ import hashlib
 import hmac
 import json
 import mimetypes
+import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
-from .ai import answer_question, retrieve_chunks, synthesize_speech, translate_text
+from . import ai
+from .report_pdf import render_report_pdf
+from .ai import retrieve_chunks, speech_text_for_language, synthesize_speech, translate_report, translate_text
 from .config import (
     CORS_ORIGINS,
     ENABLE_DEMO_AUTH,
     ENVIRONMENT,
+    FEATURE_EXTERNAL_CALENDAR,
+    FEATURE_FRAUD,
     FEATURE_TRANSLATION,
     FEATURE_VOICE,
+    GOOGLE_CLIENT_ID,
+    LANGUAGE_CODES,
+    MICROSOFT_CLIENT_ID,
     SUPPORTED_LANGUAGES,
     MAX_UPLOAD_BYTES,
     PIPELINE_STAGES,
@@ -33,8 +42,9 @@ from .config import (
     UPLOAD_DIR,
     resolve_auth_secret,
 )
+from . import calendar_sync
 from .db import DB_LOCK, IntegrityError, SCHEMA_SQL, connect, fetchall, fetchone, is_postgres
-from .notifications import deliver_reminder
+from .notifications import _scheduled_time, deliver_reminder, process_due_reminders
 from .pipeline_runner import run_pipeline
 from .storage import delete_object, store_object
 
@@ -53,6 +63,14 @@ _cors_options: dict[str, Any] = {
 if ENVIRONMENT == "development":
     _cors_options["allow_origin_regex"] = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
 app.add_middleware(CORSMiddleware, **_cors_options)
+
+_reminder_stop = threading.Event()
+_reminder_thread: threading.Thread | None = None
+
+
+def answer_question(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Indirection keeps provider monkeypatches and test adapters effective."""
+    return ai.answer_question(*args, **kwargs)
 
 
 def now() -> str:
@@ -97,6 +115,7 @@ def init_db() -> None:
     with connect() as db:
         db.executescript(SCHEMA_SQL)
         _migrate_columns(db)
+        _backfill_legacy_data(db)
         db.execute(
             "UPDATE documents SET status='completed', updated_at=? WHERE status='processing' AND stage='Complete' AND report_json IS NOT NULL",
             (now(),),
@@ -129,6 +148,10 @@ def _migrate_columns(db) -> None:
         migrations = [
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS extracted_text TEXT",
             "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS delivered_at TEXT",
+            "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS user_id TEXT",
+            "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS scheduled_for TEXT",
+            "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS error TEXT",
+            "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS session_id TEXT",
         ]
         for statement in migrations:
             try:
@@ -152,11 +175,104 @@ def _migrate_columns(db) -> None:
     reminder_columns = {row[1] for row in db.execute("PRAGMA table_info(reminders)").fetchall()}
     if reminder_columns and "delivered_at" not in reminder_columns:
         db.execute("ALTER TABLE reminders ADD COLUMN delivered_at TEXT")
+    if reminder_columns and "user_id" not in reminder_columns:
+        db.execute("ALTER TABLE reminders ADD COLUMN user_id TEXT")
+    if reminder_columns and "scheduled_for" not in reminder_columns:
+        db.execute("ALTER TABLE reminders ADD COLUMN scheduled_for TEXT")
+    if reminder_columns and "error" not in reminder_columns:
+        db.execute("ALTER TABLE reminders ADD COLUMN error TEXT")
+    message_columns = {row[1] for row in db.execute("PRAGMA table_info(chat_messages)").fetchall()}
+    if message_columns and "session_id" not in message_columns:
+        db.execute("ALTER TABLE chat_messages ADD COLUMN session_id TEXT")
+
+
+def _backfill_legacy_data(db) -> None:
+    """Make pre-session chats and pre-ID action plans usable after upgrades."""
+    legacy_pairs = fetchall(db.execute(
+        "SELECT DISTINCT user_id,document_id FROM chat_messages WHERE session_id IS NULL"
+    ))
+    for pair in legacy_pairs:
+        messages = fetchall(db.execute(
+            "SELECT id,content,created_at FROM chat_messages WHERE user_id=? AND document_id=? AND session_id IS NULL ORDER BY created_at ASC",
+            (pair["user_id"], pair["document_id"]),
+        ))
+        if not messages:
+            continue
+        session_id = str(uuid.uuid4())
+        created_at = messages[0]["created_at"]
+        updated_at = messages[-1]["created_at"]
+        first_message = str(messages[0].get("content") or "Imported chat")
+        db.execute(
+            "INSERT INTO chat_sessions (id,user_id,document_id,title,created_at,updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, pair["user_id"], pair["document_id"], _session_title(first_message), created_at, updated_at),
+        )
+        for message in messages:
+            db.execute("UPDATE chat_messages SET session_id=? WHERE id=?", (session_id, message["id"]))
+
+    documents = fetchall(db.execute(
+        "SELECT id,report_json FROM documents WHERE report_json IS NOT NULL"
+    ))
+    for document in documents:
+        try:
+            report = json.loads(document["report_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        action_plan = report.get("action_plan")
+        if not isinstance(action_plan, list) or not action_plan:
+            continue
+        items = fetchall(db.execute(
+            "SELECT id,title,detail,priority,due_date,status FROM action_items WHERE document_id=? ORDER BY ordinal",
+            (document["id"],),
+        ))
+        changed = False
+        for ordinal, action in enumerate(action_plan):
+            if not isinstance(action, dict):
+                continue
+            item = items[ordinal] if ordinal < len(items) else None
+            if item is None:
+                item_id = str(uuid.uuid4())
+                db.execute(
+                    "INSERT INTO action_items (id,document_id,title,detail,priority,status,due_date,ordinal) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (item_id, document["id"], action.get("title", "Action"), action.get("detail", ""), action.get("priority", "medium"), action.get("status", "open"), action.get("due_date"), ordinal),
+                )
+                item = {"id": item_id, "status": action.get("status", "open")}
+                items.append(item)
+            if not action.get("id"):
+                action["id"] = item["id"]
+                changed = True
+            if item.get("status") and action.get("status") != item["status"]:
+                action["status"] = item["status"]
+                changed = True
+        if changed:
+            db.execute(
+                "UPDATE documents SET report_json=?, updated_at=? WHERE id=?",
+                (json.dumps(report), now(), document["id"]),
+            )
 
 
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    global _reminder_thread
+    if PROCESSING_MODE == "local" and (_reminder_thread is None or not _reminder_thread.is_alive()):
+        _reminder_stop.clear()
+        _reminder_thread = threading.Thread(target=_reminder_loop, name="docuguardian-reminders", daemon=True)
+        _reminder_thread.start()
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    _reminder_stop.set()
+
+
+def _reminder_loop() -> None:
+    while not _reminder_stop.is_set():
+        try:
+            process_due_reminders()
+        except Exception:
+            # The next tick retries transient database or delivery failures.
+            pass
+        _reminder_stop.wait(30)
 
 
 def user_payload(user_id: str) -> dict[str, Any]:
@@ -191,8 +307,16 @@ def row_document(row: dict[str, Any]) -> dict[str, Any]:
     item.pop("organization_id", None)
     item.pop("extracted_text", None)
     report_json = item.pop("report_json", None)
-    item["report"] = json.loads(report_json) if report_json else None
+    item["report"] = filter_report_features(json.loads(report_json)) if report_json else None
     return item
+
+
+def filter_report_features(report: dict[str, Any]) -> dict[str, Any]:
+    """Keep disabled feature data out of API responses and exports."""
+    filtered = dict(report)
+    if not FEATURE_FRAUD:
+        filtered["fraud_indicators"] = []
+    return filtered
 
 
 def fetch_document(document_id: str, organization_id: str) -> dict[str, Any]:
@@ -223,11 +347,85 @@ def record_audit(document_id: str | None, action: str, user: dict[str, Any] | No
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     target_language: str | None = Field(default=None, max_length=64)
+    session_id: str | None = Field(default=None, max_length=64)
+
+
+class CreateSessionRequest(BaseModel):
+    document_id: str = Field(min_length=1, max_length=64)
+
+
+CHAT_HISTORY_LIMIT = 20
+
+
+def _session_title(message: str) -> str:
+    cleaned = " ".join(message.split())
+    if len(cleaned) <= 60:
+        return cleaned or "New chat"
+    cut = cleaned[:60]
+    last_space = cut.rfind(" ")
+    if last_space > 40:
+        cut = cut[:last_space]
+    return f"{cut.rstrip()}…"
+
+
+def _fetch_chat_session(session_id: str, user_id: str) -> dict[str, Any]:
+    with connect() as db:
+        row = fetchone(db.execute(
+            "SELECT s.*, d.name AS document_name FROM chat_sessions s "
+            "JOIN documents d ON d.id=s.document_id WHERE s.id=? AND s.user_id=?",
+            (session_id, user_id),
+        ))
+    if not row:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return row
+
+
+def _create_chat_session(db, user_id: str, document_id: str) -> str:
+    session_id = str(uuid.uuid4())
+    timestamp = now()
+    db.execute(
+        "INSERT INTO chat_sessions (id,user_id,document_id,title,created_at,updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (session_id, user_id, document_id, "New chat", timestamp, timestamp),
+    )
+    return session_id
+
+
+def _load_session_history(db, session_id: str, limit: int = CHAT_HISTORY_LIMIT) -> list[dict[str, Any]]:
+    rows = fetchall(db.execute(
+        "SELECT role, content FROM chat_messages WHERE session_id=? "
+        "ORDER BY created_at DESC, CASE role WHEN 'assistant' THEN 1 ELSE 0 END DESC LIMIT ?",
+        (session_id, limit),
+    ))
+    rows.reverse()
+    return rows
+
+
+def _resolve_chat_session(
+    db,
+    user: dict[str, Any],
+    document_id: str,
+    session_id: str | None,
+) -> str:
+    if session_id:
+        session = fetchone(db.execute(
+            "SELECT id, document_id FROM chat_sessions WHERE id=? AND user_id=?",
+            (session_id, user["id"]),
+        ))
+        if not session:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        if session["document_id"] != document_id:
+            raise HTTPException(status_code=409, detail="Chat session does not match this document")
+        return session_id
+    return _create_chat_session(db, user["id"], document_id)
 
 
 class ReminderRequest(BaseModel):
     channel: str = Field(default="in_app", pattern="^(in_app|email)$")
     days_before: int = Field(default=7, ge=0, le=365)
+
+
+class ActionItemUpdate(BaseModel):
+    status: str = Field(pattern="^(open|completed)$")
 
 
 class ComparisonRequest(BaseModel):
@@ -251,8 +449,13 @@ class TranslateRequest(BaseModel):
     target_language: str = Field(min_length=2, max_length=64)
 
 
+class ReportTranslationRequest(BaseModel):
+    target_language: str = Field(min_length=2, max_length=64)
+
+
 class VoiceRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
+    target_language: str | None = Field(default=None, max_length=64)
 
 
 @app.post("/api/v1/auth/demo")
@@ -385,19 +588,85 @@ def document_report(document_id: str, user: dict[str, Any] = Depends(current_use
     document = fetch_document(document_id, user["organization_id"])
     if document["status"] != "completed":
         raise HTTPException(status_code=409, detail="Report is not ready yet")
-    return json.loads(document["report_json"]) if document["report_json"] else {}
+    return filter_report_features(json.loads(document["report_json"])) if document["report_json"] else {}
+
+
+@app.patch("/api/v1/action-items/{action_item_id}")
+def update_action_item(
+    action_item_id: str,
+    request: ActionItemUpdate,
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    with DB_LOCK, connect() as db:
+        item = fetchone(db.execute(
+            "SELECT a.*, d.organization_id, d.report_json FROM action_items a JOIN documents d ON d.id=a.document_id "
+            "WHERE a.id=? AND d.organization_id=?",
+            (action_item_id, user["organization_id"]),
+        ))
+        if not item:
+            raise HTTPException(status_code=404, detail="Action item not found")
+        db.execute("UPDATE action_items SET status=? WHERE id=?", (request.status, action_item_id))
+        if item.get("report_json"):
+            try:
+                report = json.loads(item["report_json"])
+                for action in report.get("action_plan", []):
+                    if action.get("id") == action_item_id:
+                        action["status"] = request.status
+                db.execute("UPDATE documents SET report_json=?, updated_at=? WHERE id=?", (json.dumps(report), now(), item["document_id"]))
+            except json.JSONDecodeError:
+                pass
+    record_audit(item["document_id"], f"action_item_{request.status}", user)
+    return {
+        "id": action_item_id,
+        "document_id": item["document_id"],
+        "title": item["title"],
+        "detail": item["detail"],
+        "priority": item["priority"],
+        "due_date": item["due_date"],
+        "status": request.status,
+    }
 
 
 @app.get("/api/v1/documents/{document_id}/report/download")
-def download_report(document_id: str, user: dict[str, Any] = Depends(current_user)) -> Response:
+def download_report(
+    document_id: str,
+    format: str = Query(default="pdf", pattern="^(pdf|json)$"),
+    target_language: str | None = Query(default=None, max_length=64),
+    user: dict[str, Any] = Depends(current_user),
+) -> Response:
     document = fetch_document(document_id, user["organization_id"])
     if document["status"] != "completed" or not document["report_json"]:
         raise HTTPException(status_code=409, detail="Report is not ready yet")
+    try:
+        report = filter_report_features(json.loads(document["report_json"]))
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=503, detail="Document report is unavailable") from error
+
+    if target_language and FEATURE_TRANSLATION:
+        try:
+            report = translate_report(report, target_language)
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    stem = Path(document["name"]).stem
     record_audit(document_id, "report_download", user)
+
+    if format == "json":
+        return Response(
+            content=json.dumps(report, ensure_ascii=False, indent=2),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{stem}-report.json"'},
+        )
+
+    try:
+        pdf_bytes = render_report_pdf(document["name"], report)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"PDF generation failed: {error}") from error
+
     return Response(
-        content=document["report_json"],
-        media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="{Path(document["name"]).stem}-report.json"'},
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{stem}-report.pdf"'},
     )
 
 
@@ -411,13 +680,93 @@ def _parse_embedding(raw: str | None) -> list[float]:
     return parsed if isinstance(parsed, list) else []
 
 
+@app.post("/api/v1/chat/sessions")
+def create_chat_session(request: CreateSessionRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    document = fetch_document(request.document_id, user["organization_id"])
+    if document["status"] != "completed":
+        raise HTTPException(status_code=409, detail="Chat is available after analysis completes")
+    with DB_LOCK, connect() as db:
+        session_id = _create_chat_session(db, user["id"], request.document_id)
+    session = _fetch_chat_session(session_id, user["id"])
+    return {
+        "id": session["id"],
+        "document_id": session["document_id"],
+        "document_name": session["document_name"],
+        "title": session["title"],
+        "preview": None,
+        "created_at": session["created_at"],
+        "updated_at": session["updated_at"],
+    }
+
+
+@app.get("/api/v1/chat/sessions")
+def list_chat_sessions(user: dict[str, Any] = Depends(current_user)) -> list[dict[str, Any]]:
+    with connect() as db:
+        rows = fetchall(db.execute(
+            "SELECT s.id, s.document_id, s.title, s.created_at, s.updated_at, d.name AS document_name, "
+            "(SELECT content FROM chat_messages WHERE session_id=s.id ORDER BY created_at DESC LIMIT 1) AS preview "
+            "FROM chat_sessions s JOIN documents d ON d.id=s.document_id "
+            "WHERE s.user_id=? ORDER BY s.updated_at DESC",
+            (user["id"],),
+        ))
+    return [
+        {
+            "id": row["id"],
+            "document_id": row["document_id"],
+            "document_name": row["document_name"],
+            "title": row["title"],
+            "preview": row.get("preview"),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    ]
+
+
+@app.get("/api/v1/chat/sessions/{session_id}/messages")
+def list_chat_session_messages(session_id: str, user: dict[str, Any] = Depends(current_user)) -> list[dict[str, Any]]:
+    _fetch_chat_session(session_id, user["id"])
+    with connect() as db:
+        rows = fetchall(db.execute(
+            "SELECT id, role, content, citations_json, created_at FROM chat_messages "
+            "WHERE session_id=? ORDER BY created_at ASC",
+            (session_id,),
+        ))
+    messages: list[dict[str, Any]] = []
+    for row in rows:
+        citations = None
+        if row.get("citations_json"):
+            try:
+                citations = json.loads(row["citations_json"])
+            except json.JSONDecodeError:
+                citations = None
+        messages.append(
+            {
+                "id": row["id"],
+                "role": row["role"],
+                "content": row["content"],
+                "citations": citations,
+                "created_at": row["created_at"],
+            }
+        )
+    return messages
+
+
+@app.delete("/api/v1/chat/sessions/{session_id}", status_code=204)
+def delete_chat_session(session_id: str, user: dict[str, Any] = Depends(current_user)) -> Response:
+    _fetch_chat_session(session_id, user["id"])
+    with DB_LOCK, connect() as db:
+        db.execute("DELETE FROM chat_sessions WHERE id=? AND user_id=?", (session_id, user["id"]))
+    return Response(status_code=204)
+
+
 @app.post("/api/v1/documents/{document_id}/chat")
 def chat(document_id: str, request: ChatRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     document = fetch_document(document_id, user["organization_id"])
     if document["status"] != "completed":
         raise HTTPException(status_code=409, detail="Chat is available after analysis completes")
     try:
-        report = json.loads(document["report_json"]) if document["report_json"] else {}
+        report = filter_report_features(json.loads(document["report_json"])) if document["report_json"] else {}
     except json.JSONDecodeError:
         raise HTTPException(status_code=503, detail="Document report is unavailable")
     with connect() as db:
@@ -434,7 +783,15 @@ def chat(document_id: str, request: ChatRequest, user: dict[str, Any] = Depends(
         }
         for row in chunk_rows
     ]
-    retrieved = retrieve_chunks(request.message, chunks)
+    with DB_LOCK, connect() as db:
+        session_id = _resolve_chat_session(db, user, document_id, request.session_id)
+        history_rows = _load_session_history(db, session_id)
+        history = [{"role": row["role"], "content": row["content"]} for row in history_rows]
+    retrieval_query = request.message
+    last_user = next((row for row in reversed(history_rows) if row["role"] == "user"), None)
+    if last_user:
+        retrieval_query = f"{last_user['content']} {request.message}"
+    retrieved = retrieve_chunks(retrieval_query, chunks)
     try:
         response = answer_question(
             document["name"],
@@ -442,29 +799,52 @@ def chat(document_id: str, request: ChatRequest, user: dict[str, Any] = Depends(
             request.message,
             retrieved,
             target_language=request.target_language,
+            history=history,
         )
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error))
     except Exception as error:
         raise HTTPException(status_code=503, detail=f"Chat failed: {error}")
+    timestamp = now()
     with DB_LOCK, connect() as db:
         db.execute(
-            "INSERT INTO chat_messages VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), document_id, user["id"], "user", request.message, None, now()),
+            "INSERT INTO chat_messages (id,document_id,user_id,role,content,citations_json,created_at,session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), document_id, user["id"], "user", request.message, None, timestamp, session_id),
         )
         db.execute(
-            "INSERT INTO chat_messages VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), document_id, user["id"], "assistant", response["answer"], json.dumps(response.get("citations", [])), now()),
+            "INSERT INTO chat_messages (id,document_id,user_id,role,content,citations_json,created_at,session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                document_id,
+                user["id"],
+                "assistant",
+                response["answer"],
+                json.dumps(response.get("citations", [])),
+                timestamp,
+                session_id,
+            ),
         )
+        session_row = fetchone(db.execute("SELECT title FROM chat_sessions WHERE id=?", (session_id,)))
+        if session_row and session_row["title"] == "New chat":
+            db.execute(
+                "UPDATE chat_sessions SET title=?, updated_at=? WHERE id=?",
+                (_session_title(request.message), timestamp, session_id),
+            )
+        else:
+            db.execute("UPDATE chat_sessions SET updated_at=? WHERE id=?", (timestamp, session_id))
     record_audit(document_id, "chat", user)
-    return {**response, "disclaimer": "AI-generated decision support. Consult a qualified professional for advice."}
+    return {
+        **response,
+        "session_id": session_id,
+        "disclaimer": "AI-generated decision support. Consult a qualified professional for advice.",
+    }
 
 
 @app.get("/api/v1/deadlines")
 def list_deadlines(user: dict[str, Any] = Depends(current_user)) -> list[dict[str, Any]]:
     with connect() as db:
         return fetchall(db.execute(
-            "SELECT d.* FROM deadlines d JOIN documents doc ON doc.id=d.document_id WHERE doc.organization_id=? ORDER BY d.due_date ASC",
+            "SELECT d.*, doc.name AS document_name FROM deadlines d JOIN documents doc ON doc.id=d.document_id WHERE doc.organization_id=? ORDER BY d.due_date ASC",
             (user["organization_id"],),
         ))
 
@@ -506,6 +886,13 @@ def analytics(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
                 "SELECT substr(created_at, 1, 7) AS month, COUNT(*) AS count FROM documents WHERE organization_id=? GROUP BY 1 ORDER BY 1 DESC LIMIT 6",
                 (org,),
             ))
+        fraud_docs = 0
+        if FEATURE_FRAUD:
+            fraud_docs = fetchone(db.execute(
+                "SELECT COUNT(DISTINCT f.document_id) AS count FROM document_fraud_indicators f "
+                "JOIN documents doc ON doc.id=f.document_id WHERE doc.organization_id=? AND f.severity='high'",
+                (org,),
+            ))["count"]
     protection = max(0, 100 - round(average))
     return {
         "documents_uploaded": total,
@@ -515,6 +902,7 @@ def analytics(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
         "average_risk_score": round(average),
         "protection_score": protection,
         "upcoming_deadlines": deadlines,
+        "fraud_flagged_documents": fraud_docs,
         "categories": categories,
         "monthly_uploads": list(reversed(monthly)),
     }
@@ -533,6 +921,17 @@ def create_reminder(
         ))
         if not deadline:
             raise HTTPException(status_code=404, detail="Deadline not found")
+        try:
+            scheduled_for = _scheduled_time(deadline["due_date"], request.days_before)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="Deadline has an invalid date")
+        existing = fetchone(db.execute(
+            "SELECT * FROM reminders WHERE deadline_id=? AND user_id=? AND channel=? AND days_before=? "
+            "AND status IN ('scheduled','processing','delivered') ORDER BY created_at DESC LIMIT 1",
+            (deadline_id, user["id"], request.channel, request.days_before),
+        ))
+        if existing:
+            return existing
         reminder = {
             "id": str(uuid.uuid4()),
             "deadline_id": deadline_id,
@@ -541,20 +940,14 @@ def create_reminder(
             "status": "scheduled",
             "created_at": now(),
             "delivered_at": None,
+            "user_id": user["id"],
+            "scheduled_for": scheduled_for,
+            "error": None,
         }
         db.execute(
-            "INSERT INTO reminders (id,deadline_id,channel,days_before,status,created_at,delivered_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO reminders (id,deadline_id,channel,days_before,status,created_at,delivered_at,user_id,scheduled_for,error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             tuple(reminder.values()),
         )
-    notification = deliver_reminder(
-        organization_id=user["organization_id"],
-        user_id=user["id"],
-        deadline=deadline,
-        reminder_id=reminder["id"],
-        channel=request.channel,
-    )
-    reminder["status"] = "delivered"
-    reminder["notification"] = notification
     record_audit(deadline["document_id"], "reminder_created", user)
     return reminder
 
@@ -599,38 +992,75 @@ def compare_documents(request: ComparisonRequest, user: dict[str, Any] = Depends
     second = fetch_document(request.document_b_id, user["organization_id"])
     if first["status"] != "completed" or second["status"] != "completed":
         raise HTTPException(status_code=409, detail="Both documents must finish analysis before comparison")
-    first_report = json.loads(first["report_json"] or "{}")
-    second_report = json.loads(second["report_json"] or "{}")
-    first_risks = {risk.get("title", "").strip() for risk in first_report.get("risks", [])}
-    second_risks = {risk.get("title", "").strip() for risk in second_report.get("risks", [])}
-    first_deadlines = {deadline.get("title", "").strip() for deadline in first_report.get("deadlines", [])}
-    second_deadlines = {deadline.get("title", "").strip() for deadline in second_report.get("deadlines", [])}
-    first_clauses = {clause.get("title", "").strip(): clause for clause in first_report.get("clauses", []) if clause.get("title")}
-    second_clauses = {clause.get("title", "").strip(): clause for clause in second_report.get("clauses", []) if clause.get("title")}
+    first_report = filter_report_features(json.loads(first["report_json"] or "{}"))
+    second_report = filter_report_features(json.loads(second["report_json"] or "{}"))
+    def normalized(value: Any) -> str:
+        return " ".join("".join(character.lower() if character.isalnum() else " " for character in str(value or "")).split())
+
+    def clause_matches(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> list[tuple[dict[str, Any], dict[str, Any], float]]:
+        remaining = set(range(len(right)))
+        matches: list[tuple[dict[str, Any], dict[str, Any], float]] = []
+        for left_clause in left:
+            title = normalized(left_clause.get("title"))
+            candidates = [index for index in remaining if normalized(right[index].get("title")) == title and title]
+            if not candidates:
+                candidates = [
+                    index for index in remaining
+                    if left_clause.get("category") and left_clause.get("category") == right[index].get("category")
+                ]
+            if not candidates:
+                continue
+            index = max(candidates, key=lambda item: difflib.SequenceMatcher(None, normalized(left_clause.get("body")), normalized(right[item].get("body"))).ratio())
+            remaining.remove(index)
+            score = difflib.SequenceMatcher(None, normalized(left_clause.get("body")), normalized(right[index].get("body"))).ratio()
+            matches.append((left_clause, right[index], score))
+        return matches
+
+    first_risks = {normalized(risk.get("title")): risk.get("title") for risk in first_report.get("risks", []) if risk.get("title")}
+    second_risks = {normalized(risk.get("title")): risk.get("title") for risk in second_report.get("risks", []) if risk.get("title")}
+    first_deadlines = {normalized(deadline.get("title")): deadline for deadline in first_report.get("deadlines", []) if deadline.get("title")}
+    second_deadlines = {normalized(deadline.get("title")): deadline for deadline in second_report.get("deadlines", []) if deadline.get("title")}
+    first_clauses_list = [clause for clause in first_report.get("clauses", []) if clause.get("title")]
+    second_clauses_list = [clause for clause in second_report.get("clauses", []) if clause.get("title")]
+    matches = clause_matches(first_clauses_list, second_clauses_list)
+    matched_left = {id(left) for left, _, _ in matches}
+    matched_right = {id(right) for _, right, _ in matches}
     modified = []
-    for title in sorted(set(first_clauses) & set(second_clauses)):
-        left, right = first_clauses[title], second_clauses[title]
-        if (left.get("body") or "") != (right.get("body") or "") or left.get("severity") != right.get("severity"):
+    for left, right, match_score in matches:
+        if (normalized(left.get("body")) != normalized(right.get("body")) or left.get("severity") != right.get("severity")):
             modified.append({
-                "title": title,
+                "title": left.get("title") or right.get("title"),
+                "document_b_title": right.get("title"),
                 "document_a_severity": left.get("severity"),
                 "document_b_severity": right.get("severity"),
+                "severity_changed": left.get("severity") != right.get("severity"),
+                "match_score": round(match_score * 100),
                 "document_a_excerpt": (left.get("body") or "")[:240],
                 "document_b_excerpt": (right.get("body") or "")[:240],
             })
+    added_clause_items = [clause.get("title") for clause in second_clauses_list if id(clause) not in matched_right]
+    removed_clause_items = [clause.get("title") for clause in first_clauses_list if id(clause) not in matched_left]
+    deadline_changes = []
+    for title in sorted(set(first_deadlines) & set(second_deadlines)):
+        left, right = first_deadlines[title], second_deadlines[title]
+        if left.get("date") != right.get("date"):
+            deadline_changes.append({"title": left.get("title"), "document_a_date": left.get("date"), "document_b_date": right.get("date")})
     first_text = json.dumps(first_report, sort_keys=True)
     second_text = json.dumps(second_report, sort_keys=True)
     return {
         "document_a": first["name"],
         "document_b": second["name"],
         "similarity_score": round(difflib.SequenceMatcher(None, first_text, second_text).ratio() * 100),
-        "added_risks": sorted(second_risks - first_risks),
-        "removed_risks": sorted(first_risks - second_risks),
-        "added_deadlines": sorted(second_deadlines - first_deadlines),
-        "removed_deadlines": sorted(first_deadlines - second_deadlines),
-        "added_clauses": sorted(set(second_clauses) - set(first_clauses)),
-        "removed_clauses": sorted(set(first_clauses) - set(second_clauses)),
+        "added_risks": sorted(second_risks[key] for key in set(second_risks) - set(first_risks)),
+        "removed_risks": sorted(first_risks[key] for key in set(first_risks) - set(second_risks)),
+        "added_deadlines": sorted(second_deadlines[key].get("title", key) for key in set(second_deadlines) - set(first_deadlines)),
+        "removed_deadlines": sorted(first_deadlines[key].get("title", key) for key in set(first_deadlines) - set(second_deadlines)),
+        "deadline_changes": deadline_changes,
+        "added_clauses": sorted(added_clause_items),
+        "removed_clauses": sorted(removed_clause_items),
         "modified_clauses": modified,
+        "risk_score_delta": int(second_report.get("risk_score", 0)) - int(first_report.get("risk_score", 0)),
+        "risk_level_changed": first_report.get("risk_level") != second_report.get("risk_level"),
         "disclaimer": "Comparison is an AI-assisted review and should not replace professional advice.",
     }
 
@@ -649,10 +1079,90 @@ def features() -> dict[str, Any]:
     return {
         "voice": FEATURE_VOICE,
         "translation": FEATURE_TRANSLATION,
+        "fraud": FEATURE_FRAUD,
+        "external_calendar": FEATURE_EXTERNAL_CALENDAR and calendar_sync.is_configured(),
         "demo_auth": ENABLE_DEMO_AUTH,
         "pipeline_stages": list(PIPELINE_STAGES),
         "supported_languages": list(SUPPORTED_LANGUAGES),
+        "language_options": [
+            {"label": label, "code": LANGUAGE_CODES.get(label, label[:2].lower())}
+            for label in SUPPORTED_LANGUAGES
+        ],
     }
+
+
+class CalendarAutoSyncRequest(BaseModel):
+    enabled: bool
+
+
+@app.get("/api/v1/integrations/calendar")
+def calendar_status(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    return {
+        "enabled": FEATURE_EXTERNAL_CALENDAR and calendar_sync.is_configured(),
+        "integrations": calendar_sync.list_integrations(user["organization_id"], user["id"]),
+    }
+
+
+@app.get("/api/v1/integrations/calendar/google/authorize")
+def calendar_google_authorize(user: dict[str, Any] = Depends(current_user)) -> dict[str, str]:
+    if not FEATURE_EXTERNAL_CALENDAR or not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=404, detail="Google Calendar integration is not configured")
+    state = calendar_sync.create_oauth_state(user["organization_id"], user["id"], "google")
+    return {"authorization_url": calendar_sync.google_authorize_url(state)}
+
+
+@app.get("/api/v1/integrations/calendar/google/callback")
+def calendar_google_callback(code: str = Query(...), state: str = Query(...)) -> RedirectResponse:
+    try:
+        payload = calendar_sync.consume_oauth_state(state, "google")
+        if not payload:
+            raise ValueError("Invalid or expired OAuth state")
+        calendar_sync.complete_google_oauth(code, payload["organization_id"], payload["user_id"])
+        return RedirectResponse(calendar_sync.settings_redirect("connected", "google"))
+    except Exception:
+        return RedirectResponse(calendar_sync.settings_redirect("failed", "google"))
+
+
+@app.get("/api/v1/integrations/calendar/outlook/authorize")
+def calendar_outlook_authorize(user: dict[str, Any] = Depends(current_user)) -> dict[str, str]:
+    if not FEATURE_EXTERNAL_CALENDAR or not MICROSOFT_CLIENT_ID:
+        raise HTTPException(status_code=404, detail="Outlook Calendar integration is not configured")
+    state = calendar_sync.create_oauth_state(user["organization_id"], user["id"], "outlook")
+    return {"authorization_url": calendar_sync.outlook_authorize_url(state)}
+
+
+@app.get("/api/v1/integrations/calendar/outlook/callback")
+def calendar_outlook_callback(code: str = Query(...), state: str = Query(...)) -> RedirectResponse:
+    try:
+        payload = calendar_sync.consume_oauth_state(state, "outlook")
+        if not payload:
+            raise ValueError("Invalid or expired OAuth state")
+        calendar_sync.complete_outlook_oauth(code, payload["organization_id"], payload["user_id"])
+        return RedirectResponse(calendar_sync.settings_redirect("connected", "outlook"))
+    except Exception:
+        return RedirectResponse(calendar_sync.settings_redirect("failed", "outlook"))
+
+
+@app.delete("/api/v1/integrations/calendar/{provider}")
+def calendar_disconnect(provider: str, user: dict[str, Any] = Depends(current_user)) -> dict[str, str]:
+    if provider not in {"google", "outlook"}:
+        raise HTTPException(status_code=400, detail="Unsupported calendar provider")
+    calendar_sync.disconnect(user["organization_id"], user["id"], provider)
+    record_audit(None, f"calendar_disconnected_{provider}", user)
+    return {"status": "disconnected", "provider": provider}
+
+
+@app.post("/api/v1/integrations/calendar/sync")
+def calendar_sync_all(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    result = calendar_sync.sync_organization_deadlines(user["organization_id"], user["id"])
+    record_audit(None, "calendar_sync", user)
+    return result
+
+
+@app.patch("/api/v1/integrations/calendar/{integration_id}/auto-sync")
+def calendar_auto_sync(integration_id: str, request: CalendarAutoSyncRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, str]:
+    calendar_sync.set_auto_sync(integration_id, user["organization_id"], user["id"], request.enabled)
+    return {"status": "updated", "auto_sync": "on" if request.enabled else "off"}
 
 
 @app.post("/api/v1/translate")
@@ -665,17 +1175,41 @@ def translate(request: TranslateRequest, user: dict[str, Any] = Depends(current_
         raise HTTPException(status_code=503, detail=str(error))
 
 
+@app.post("/api/v1/documents/{document_id}/translate")
+def translate_document_report(
+    document_id: str,
+    request: ReportTranslationRequest,
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    if not FEATURE_TRANSLATION:
+        raise HTTPException(status_code=404, detail="Translation is disabled")
+    document = fetch_document(document_id, user["organization_id"])
+    if document["status"] != "completed" or not document["report_json"]:
+        raise HTTPException(status_code=409, detail="Report is not ready yet")
+    try:
+        report = filter_report_features(json.loads(document["report_json"]))
+        translated = translate_report(report, request.target_language)
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error))
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=503, detail="Document report is unavailable") from error
+    record_audit(document_id, "report_translated", user)
+    return {"target_language": request.target_language, "report": translated}
+
+
 @app.post("/api/v1/voice-summary")
 def voice_summary(request: VoiceRequest, user: dict[str, Any] = Depends(current_user)) -> Response:
     if not FEATURE_VOICE:
         raise HTTPException(status_code=404, detail="Voice summary is disabled")
     try:
-        audio = synthesize_speech(request.text)
+        spoken_text, spoken_language = speech_text_for_language(request.text, request.target_language)
+        audio = synthesize_speech(spoken_text, request.target_language)
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error))
     except Exception as error:
         raise HTTPException(status_code=503, detail=f"Voice synthesis unavailable: {error}")
-    return Response(content=audio, media_type="audio/mpeg")
+    headers = {"X-Voice-Language": spoken_language or "English"}
+    return Response(content=audio, media_type="audio/mpeg", headers=headers)
 
 
 def process_document(document_id: str, organization_id: str, user: dict[str, Any]) -> None:
@@ -722,6 +1256,10 @@ def process_document(document_id: str, organization_id: str, user: dict[str, Any
             upload_dir=UPLOAD_DIR,
             on_stage=on_stage,
         )
+        try:
+            calendar_sync.sync_document_deadlines(document_id, organization_id)
+        except Exception:
+            pass
         with DB_LOCK, connect() as db:
             db.execute(
                 "UPDATE processing_stages SET status='completed',progress=100,completed_at=COALESCE(completed_at, ?) WHERE document_id=?",
